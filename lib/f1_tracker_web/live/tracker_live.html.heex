@@ -1,156 +1,527 @@
 <div class="min-h-screen bg-gray-950 text-white">
   <!-- Header -->
-  <header class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <h1 class="text-xl font-bold text-red-500">🏎️ F1 Tracker</h1>
+  <header class="bg-gray-900 border-b border-gray-800 px-3 sm:px-6 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-2 sm:gap-3">
+      <h1 class="text-lg sm:text-xl font-bold text-red-500">F1 Tracker</h1>
       <%= if @tracking do %>
         <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-green-900 text-green-300">
-          <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
-          LIVE
+          <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span> LIVE
         </span>
       <% end %>
     </div>
 
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-2 sm:gap-3">
+      <!-- Weather: icons only on mobile, full text on desktop -->
       <%= if @weather do %>
-        <div class="text-sm text-gray-400">
-          🌡️ <%= @weather["air_temperature"] %>°C
-          💨 <%= @weather["wind_speed"] %> km/h
-          💧 <%= @weather["humidity"] %>%
+        <div class="hidden sm:flex text-sm text-gray-400 gap-2">
+          <span>{@weather["air_temperature"]}°C</span>
+          <span>{@weather["wind_speed"]} km/h</span>
+          <span>{@weather["humidity"]}%</span>
+        </div>
+        <div class="flex sm:hidden text-xs text-gray-400 gap-1.5">
+          <span>{@weather["air_temperature"]}°</span>
+          <span>{@weather["humidity"]}%</span>
         </div>
       <% end %>
 
       <%= if @tracking do %>
-        <button phx-click="stop_tracking" class="px-3 py-1.5 text-sm bg-red-700 hover:bg-red-600 rounded">
+        <!-- Mobile timing toggle -->
+        <button
+          phx-click="toggle_timing"
+          class="lg:hidden px-2.5 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
+          title="Toggle timing tower"
+        >
+          <.icon name="hero-bars-3" class="w-4 h-4" />
+        </button>
+        <button
+          phx-click="stop_tracking"
+          class="px-3 py-1.5 text-sm bg-red-700 hover:bg-red-600 rounded"
+        >
           Stop
         </button>
       <% else %>
-        <button phx-click="load_sessions" class="px-3 py-1.5 text-sm bg-blue-700 hover:bg-blue-600 rounded">
+        <button
+          phx-click="load_sessions"
+          class="px-3 py-1.5 text-sm bg-blue-700 hover:bg-blue-600 rounded"
+        >
           Load Sessions
         </button>
       <% end %>
     </div>
   </header>
 
-  <div class="flex h-[calc(100vh-56px)]">
-    <!-- Session Picker (sidebar when not tracking) -->
-    <%= if !@tracking and @sessions != [] do %>
-      <aside class="w-80 bg-gray-900 border-r border-gray-800 overflow-y-auto p-4">
-        <h2 class="text-sm font-semibold text-gray-400 uppercase mb-3">Sessions</h2>
-        <div class="space-y-2">
-          <%= for session <- @sessions do %>
-            <button
-              phx-click="track_session"
-              phx-value-session_key={session.session_key}
-              class="w-full text-left p-3 rounded-lg bg-gray-800 hover:bg-gray-700 transition"
-            >
-              <div class="font-semibold text-sm"><%= session.circuit %> — <%= session.name %></div>
-              <div class="text-xs text-gray-400"><%= session.country %> · <%= session.year %></div>
-              <div class="text-xs text-gray-500 mt-1"><%= session.date %></div>
-            </button>
+  <div class="flex flex-col lg:flex-row h-[calc(100vh-56px)]">
+    <!-- Session Picker -->
+    <%= if !@tracking and @all_sessions != [] do %>
+      <%!-- Mobile: full-width overlay / Desktop: sidebar --%>
+      <aside class="w-full lg:w-80 bg-gray-900 border-r border-gray-800 flex flex-col max-h-[50vh] lg:max-h-full">
+        <!-- Search & Filters (sticky) -->
+        <div class="bg-gray-900 border-b border-gray-800 p-3 sm:p-4 space-y-2 sm:space-y-3 flex-shrink-0">
+          <h2 class="text-sm font-semibold text-gray-400 uppercase">Sessions</h2>
+          
+<!-- Search -->
+          <div class="relative">
+            <.icon
+              name="hero-magnifying-glass"
+              class="w-4 h-4 absolute left-2.5 top-2.5 text-gray-500"
+            />
+            <input
+              type="text"
+              name="search"
+              phx-keyup="filter_sessions"
+              phx-debounce="200"
+              placeholder="Search circuit or country..."
+              value={@filter_search}
+              class="w-full bg-gray-800 border border-gray-700 rounded-lg pl-8 pr-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-red-500 focus:border-red-500"
+            />
+          </div>
+          
+<!-- Type filter pills -->
+          <div class="flex flex-wrap gap-1.5">
+            <%= for type <- session_types() do %>
+              <button
+                phx-click="filter_type"
+                phx-value-type={type}
+                class={[
+                  "px-2.5 py-1 text-xs rounded-full transition-colors",
+                  if(@filter_type == type,
+                    do: "bg-red-600 text-white",
+                    else: "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-300"
+                  )
+                ]}
+              >
+                {type_label(type)}
+              </button>
+            <% end %>
+          </div>
+
+          <div class="text-xs text-gray-500">
+            {length(@sessions)} session(s) found
+          </div>
+        </div>
+        
+<!-- Session list (scrollable) -->
+        <div class="flex-1 overflow-y-auto p-3 sm:p-4 space-y-2">
+          <%= if @sessions == [] do %>
+            <div class="text-center py-8 text-gray-500">
+              <.icon name="hero-magnifying-glass" class="w-8 h-8 mx-auto mb-2 text-gray-600" />
+              <p class="text-sm">No sessions match your filters</p>
+            </div>
+          <% else %>
+            <%= for session <- @sessions do %>
+              <button
+                phx-click="track_session"
+                phx-value-session_key={session.session_key}
+                class="w-full text-left p-3 rounded-lg bg-gray-800 hover:bg-gray-700 transition group"
+              >
+                <div class="flex items-center justify-between">
+                  <div class="font-semibold text-sm">{session.circuit}</div>
+                  <span class={[
+                    "text-[10px] font-medium px-1.5 py-0.5 rounded",
+                    session_type_badge(session.type)
+                  ]}>
+                    {session.type}
+                  </span>
+                </div>
+                <div class="text-xs text-gray-400 mt-0.5">
+                  {session.country} · {session.year}
+                </div>
+                <div class="text-xs text-gray-500 mt-1">
+                  {format_session_date(session.date)}
+                </div>
+              </button>
+            <% end %>
           <% end %>
         </div>
       </aside>
     <% end %>
-
-    <!-- Main Content -->
-    <main class="flex-1 flex">
+    
+<!-- Main Content -->
+    <main class="flex-1 flex flex-col lg:flex-row min-h-0">
       <!-- Track Map -->
-      <div class="flex-1 relative" id="track-map" phx-hook="TrackMap" phx-update="ignore">
-        <div id="map-container" class="w-full h-full"></div>
+      <div class="flex-1 relative min-h-[40vh] lg:min-h-0">
+        <div
+          id="track-map"
+          phx-hook="TrackMap"
+          phx-update="ignore"
+          class="w-full h-full"
+        >
+          <div id="map-container" class="w-full h-full"></div>
+        </div>
 
-        <%= if !@tracking and @sessions == [] do %>
-          <div class="absolute inset-0 flex items-center justify-center">
-            <div class="text-center">
-              <div class="text-6xl mb-4">🏁</div>
-              <h2 class="text-2xl font-bold mb-2">F1 Live Tracker</h2>
-              <p class="text-gray-400 mb-6">Real-time car positions & timing data</p>
-              <button phx-click="load_sessions" class="px-6 py-3 bg-red-600 hover:bg-red-500 rounded-lg font-semibold">
+        <%= if @loading do %>
+          <div class="absolute inset-0 flex items-center justify-center z-10 bg-gray-950/80">
+            <div class="text-center px-4">
+              <div class="w-10 h-10 border-4 border-red-500 border-t-transparent rounded-full animate-spin mx-auto mb-4">
+              </div>
+              <p class="text-gray-400 text-sm">Loading session data...</p>
+            </div>
+          </div>
+        <% end %>
+
+        <%= if @replay_loading do %>
+          <div class="absolute inset-0 flex items-center justify-center z-10 bg-gray-950/80">
+            <div class="text-center px-4">
+              <div class="w-10 h-10 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4">
+              </div>
+              <p class="text-gray-400 text-sm">Loading race data for replay...</p>
+            </div>
+          </div>
+        <% end %>
+
+        <%= if !@tracking and !@loading and @all_sessions == [] do %>
+          <div class="absolute inset-0 flex items-center justify-center z-10">
+            <div class="text-center px-4">
+              <div class="text-5xl sm:text-6xl mb-4">🏁</div>
+              <h2 class="text-xl sm:text-2xl font-bold mb-2">F1 Live Tracker</h2>
+              <p class="text-gray-400 mb-6 text-sm sm:text-base">
+                Real-time car positions & timing data
+              </p>
+              <button
+                phx-click="load_sessions"
+                class="px-6 py-3 bg-red-600 hover:bg-red-500 rounded-lg font-semibold"
+              >
                 Get Started
               </button>
             </div>
           </div>
         <% end %>
-      </div>
 
-      <!-- Timing Tower -->
-      <%= if @tracking do %>
-        <aside class="w-96 bg-gray-900 border-l border-gray-800 overflow-y-auto">
-          <!-- Timing Header -->
-          <div class="sticky top-0 bg-gray-900 border-b border-gray-800 px-4 py-2">
-            <h2 class="text-sm font-semibold text-gray-400 uppercase">Timing</h2>
+        <%!-- Replay Controls Bar --%>
+        <%= if @replay_active do %>
+          <div class="absolute bottom-0 left-0 right-0 z-10 bg-gray-900/95 border-t border-gray-700 px-3 sm:px-4 py-2">
+            <div class="flex items-center gap-2 sm:gap-3">
+              <%!-- Play/Pause --%>
+              <button
+                phx-click="replay_toggle_pause"
+                class="w-8 h-8 flex items-center justify-center rounded-full bg-purple-600 hover:bg-purple-500 transition-colors flex-shrink-0"
+              >
+                <%= if @replay_paused do %>
+                  <.icon name="hero-play-solid" class="w-4 h-4 text-white" />
+                <% else %>
+                  <.icon name="hero-pause-solid" class="w-4 h-4 text-white" />
+                <% end %>
+              </button>
+
+              <%!-- Progress bar / scrubber --%>
+              <div class="flex-1 min-w-0">
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.001"
+                  value={@replay_progress}
+                  phx-change="replay_seek"
+                  name="value"
+                  class="w-full h-1.5 bg-gray-700 rounded-full appearance-none cursor-pointer accent-purple-500"
+                />
+              </div>
+
+              <%!-- Time display --%>
+              <div class="text-xs text-gray-400 font-mono flex-shrink-0 hidden sm:block">
+                {format_replay_cursor(@replay_cursor)}
+              </div>
+
+              <%!-- Speed selector --%>
+              <div class="flex items-center gap-1 flex-shrink-0">
+                <%= for speed <- [1, 5, 10, 20, 50] do %>
+                  <button
+                    phx-click="replay_set_speed"
+                    phx-value-speed={speed}
+                    class={[
+                      "px-1.5 py-0.5 text-[10px] font-mono rounded transition-colors",
+                      if(@replay_speed == speed,
+                        do: "bg-purple-600 text-white",
+                        else: "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                      )
+                    ]}
+                  >
+                    {speed}x
+                  </button>
+                <% end %>
+              </div>
+            </div>
           </div>
-
-          <!-- Driver Rows -->
+        <% end %>
+      </div>
+      
+<!-- Timing Tower -->
+      <%= if @tracking do %>
+        <%!--
+          Mobile: slide-up panel controlled by @show_timing
+          Desktop (lg+): always-visible sidebar
+        --%>
+        <aside class={[
+          "bg-gray-900 border-t lg:border-t-0 lg:border-l border-gray-800 overflow-y-auto transition-all duration-300",
+          "w-full lg:w-[440px]",
+          if(@show_timing,
+            do: "max-h-[60vh] lg:max-h-full",
+            else: "max-h-0 lg:max-h-full overflow-hidden lg:overflow-y-auto"
+          )
+        ]}>
+          <!-- Timing Header -->
+          <div class="sticky top-0 bg-gray-900 border-b border-gray-800 px-3 sm:px-4 py-2 z-10">
+            <div class="flex items-center justify-between">
+              <h2 class="text-sm font-semibold text-gray-400 uppercase">Timing</h2>
+              <div class="hidden sm:flex gap-2 text-[9px] text-gray-500 uppercase">
+                <span class="text-purple-400">Overall best</span>
+                <span class="text-green-400">Personal best</span>
+              </div>
+            </div>
+          </div>
+          
+<!-- Driver Rows -->
           <div class="divide-y divide-gray-800">
             <%= for pos <- @positions do %>
               <% driver = Map.get(@drivers, pos.driver_number, %{}) %>
               <% interval = Map.get(@intervals, pos.driver_number, %{}) %>
+              <% stint = Map.get(@stints, pos.driver_number, nil) %>
               <% lap = latest_lap(@laps, pos.driver_number) %>
               <% best = best_lap(@laps, pos.driver_number) %>
+              <% pb =
+                Map.get(@personal_best_sectors, pos.driver_number, %{s1: nil, s2: nil, s3: nil}) %>
 
-              <div class="px-4 py-2 flex items-center gap-3 hover:bg-gray-800/50 transition">
+              <div class="px-2 sm:px-4 py-1.5 sm:py-2 flex items-center gap-2 sm:gap-3 hover:bg-gray-800/50 transition">
                 <!-- Position -->
-                <div class="w-6 text-center font-bold text-sm">
-                  <%= pos.position %>
+                <div class="w-5 sm:w-6 text-center font-bold text-xs sm:text-sm">
+                  {pos.position}
                 </div>
-
-                <!-- Team colour bar -->
+                
+<!-- Team colour bar -->
                 <div
-                  class="w-1 h-8 rounded-full"
+                  class="w-1 h-6 sm:h-8 rounded-full flex-shrink-0"
                   style={"background-color: ##{driver[:team_colour] || "666"}"}
                 >
                 </div>
-
-                <!-- Driver info -->
+                
+<!-- Driver headshot (hidden on very small screens) -->
+                <div class="hidden sm:block w-8 h-8 rounded-full overflow-hidden bg-gray-700 flex-shrink-0">
+                  <%= if driver[:headshot_url] do %>
+                    <img
+                      src={driver[:headshot_url]}
+                      alt={driver[:code] || "Driver"}
+                      class="w-full h-full object-cover"
+                      loading="lazy"
+                    />
+                  <% else %>
+                    <div class="w-full h-full flex items-center justify-center text-xs font-bold text-gray-400">
+                      {(driver[:code] && String.slice(driver[:code], 0, 2)) || "?"}
+                    </div>
+                  <% end %>
+                </div>
+                
+<!-- Driver info -->
                 <div class="flex-1 min-w-0">
-                  <div class="flex items-center gap-2">
-                    <span class="font-bold text-sm"><%= driver[:code] || "???" %></span>
-                    <span class="text-xs text-gray-500"><%= driver[:number] %></span>
+                  <div class="flex items-center gap-1 sm:gap-2">
+                    <span class="font-bold text-xs sm:text-sm">{driver[:code] || "???"}</span>
+                    <span class="hidden sm:inline text-xs text-gray-500">{driver[:number]}</span>
                   </div>
-                  <div class="text-xs text-gray-400 truncate"><%= driver[:team] %></div>
+                  <div class="hidden sm:block text-xs text-gray-400 truncate">
+                    {driver[:team]}
+                  </div>
                 </div>
-
-                <!-- Lap time -->
+                
+<!-- Tyre compound -->
+                <div class="flex items-center gap-0.5 sm:gap-1" title={stint && stint[:compound]}>
+                  <div class={[
+                    "w-4 h-4 sm:w-5 sm:h-5 rounded-full flex items-center justify-center text-[9px] sm:text-[10px] font-bold ring-1 ring-gray-600",
+                    tyre_colour(stint && stint[:compound]),
+                    if(stint && stint[:compound] in ["HARD", "MEDIUM"],
+                      do: "text-gray-900",
+                      else: "text-white"
+                    )
+                  ]}>
+                    {tyre_label(stint && stint[:compound])}
+                  </div>
+                  <span class="hidden sm:inline text-[10px] text-gray-500 font-mono w-4 text-right">
+                    {if stint, do: tyre_age(stint, @laps, pos.driver_number), else: "-"}
+                  </span>
+                </div>
+                
+<!-- Lap time -->
                 <div class="text-right">
-                  <div class="text-sm font-mono">
-                    <%= if lap, do: format_lap_time(lap.lap_duration), else: "-" %>
+                  <div class="text-xs sm:text-sm font-mono">
+                    {if lap, do: format_lap_time(lap.lap_duration), else: "-"}
                   </div>
-                  <div class="text-xs text-gray-500 font-mono">
-                    <%= if best, do: "B: #{format_lap_time(best.lap_duration)}", else: "" %>
+                  <div class="hidden sm:block text-xs text-gray-500 font-mono">
+                    {if best, do: "B: #{format_lap_time(best.lap_duration)}", else: ""}
                   </div>
                 </div>
-
-                <!-- Gap -->
-                <div class="w-20 text-right">
-                  <div class="text-sm font-mono text-yellow-400">
-                    <%= format_gap(interval[:gap_to_leader]) %>
+                
+<!-- Sector times (desktop only) -->
+                <div class="hidden xl:flex gap-px">
+                  <div class={[
+                    "text-[10px] font-mono w-[42px] text-center px-0.5 py-0.5 rounded-sm",
+                    sector_colour(lap && lap.sector_1, pb.s1, @best_sectors.s1)
+                  ]}>
+                    {format_sector(lap && lap.sector_1)}
                   </div>
-                  <div class="text-xs font-mono text-gray-500">
-                    <%= format_gap(interval[:interval]) %>
+                  <div class={[
+                    "text-[10px] font-mono w-[42px] text-center px-0.5 py-0.5 rounded-sm",
+                    sector_colour(lap && lap.sector_2, pb.s2, @best_sectors.s2)
+                  ]}>
+                    {format_sector(lap && lap.sector_2)}
+                  </div>
+                  <div class={[
+                    "text-[10px] font-mono w-[42px] text-center px-0.5 py-0.5 rounded-sm",
+                    sector_colour(lap && lap.sector_3, pb.s3, @best_sectors.s3)
+                  ]}>
+                    {format_sector(lap && lap.sector_3)}
+                  </div>
+                </div>
+                
+<!-- Gap -->
+                <div class="w-14 sm:w-20 text-right">
+                  <div class="text-xs sm:text-sm font-mono text-yellow-400">
+                    {format_gap(interval[:gap_to_leader])}
+                  </div>
+                  <div class="hidden sm:block text-xs font-mono text-gray-500">
+                    {format_gap(interval[:interval])}
                   </div>
                 </div>
               </div>
             <% end %>
           </div>
-
-          <!-- Race Control Messages -->
+          
+<!-- Race Control Messages -->
           <%= if @race_control != [] do %>
-            <div class="border-t border-gray-800 p-4">
+            <div class="border-t border-gray-800 p-3 sm:p-4">
               <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Race Control</h3>
               <div class="space-y-1">
                 <%= for msg <- Enum.take(@race_control, -5) do %>
                   <div class={"text-xs p-2 rounded #{race_control_class(msg)}"}>
-                    <span class="text-gray-500"><%= msg["date"] && String.slice(msg["date"], 11, 8) %></span>
-                    <%= msg["message"] %>
+                    <span class="text-gray-500">
+                      {msg["date"] && String.slice(msg["date"], 11, 8)}
+                    </span>
+                    {msg["message"]}
+                  </div>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
+          
+<!-- Team Radio -->
+          <%= if @team_radio != [] do %>
+            <div class="border-t border-gray-800 p-3 sm:p-4">
+              <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">
+                <.icon name="hero-signal" class="w-3 h-3 inline" /> Team Radio
+              </h3>
+              <div class="space-y-1.5 max-h-40 overflow-y-auto">
+                <%= for radio <- Enum.take(@team_radio, -5) |> Enum.reverse() do %>
+                  <% radio_driver = Map.get(@drivers, radio.driver_number, %{}) %>
+                  <div
+                    id={"radio-#{radio.driver_number}-#{radio.date}"}
+                    phx-hook=".RadioPlayer"
+                    data-url={radio.recording_url}
+                    class="flex items-center gap-2 p-1.5 rounded bg-gray-800/50 hover:bg-gray-800 transition cursor-pointer group"
+                  >
+                    <button
+                      class="w-6 h-6 rounded-full bg-blue-600 hover:bg-blue-500 flex items-center justify-center flex-shrink-0 transition-colors"
+                      data-play-btn
+                    >
+                      <.icon name="hero-play" class="w-3 h-3 text-white" />
+                    </button>
+                    <div class="flex-1 min-w-0">
+                      <div class="flex items-center gap-1.5">
+                        <span
+                          class="w-2 h-2 rounded-full flex-shrink-0"
+                          style={"background-color: ##{radio_driver[:team_colour] || "666"}"}
+                        >
+                        </span>
+                        <span class="text-xs font-bold">
+                          {radio_driver[:code] || "???"}
+                        </span>
+                        <span class="text-[10px] text-gray-500">
+                          {radio.date && String.slice(radio.date, 11, 8)}
+                        </span>
+                      </div>
+                    </div>
+                    <div
+                      class="w-12 h-1 bg-gray-700 rounded-full overflow-hidden"
+                      data-progress-bar
+                    >
+                      <div
+                        class="h-full bg-blue-500 rounded-full transition-all"
+                        style="width: 0%"
+                        data-progress-fill
+                      >
+                      </div>
+                    </div>
                   </div>
                 <% end %>
               </div>
             </div>
           <% end %>
 
-          <!-- Replay Controls -->
-          <div class="border-t border-gray-800 p-4">
+          <script :type={Phoenix.LiveView.ColocatedHook} name=".RadioPlayer">
+            export default {
+              mounted() {
+                this.audio = null;
+                this.playing = false;
+                const url = this.el.dataset.url;
+                const playBtn = this.el.querySelector("[data-play-btn]");
+                const progressFill = this.el.querySelector("[data-progress-fill]");
+
+                playBtn.addEventListener("click", (e) => {
+                  e.stopPropagation();
+                  if (this.playing) {
+                    this.stop();
+                  } else {
+                    this.play(url, progressFill, playBtn);
+                  }
+                });
+              },
+
+              play(url, progressFill, playBtn) {
+                // Stop any other playing radios
+                document.querySelectorAll("[data-playing='true']").forEach((el) => {
+                  el.removeAttribute("data-playing");
+                  el.dispatchEvent(new CustomEvent("radio:stop"));
+                });
+
+                this.audio = new Audio(url);
+                this.playing = true;
+                this.el.setAttribute("data-playing", "true");
+                playBtn.classList.replace("bg-blue-600", "bg-red-600");
+                playBtn.classList.replace("hover:bg-blue-500", "hover:bg-red-500");
+
+                this.audio.addEventListener("timeupdate", () => {
+                  if (this.audio.duration) {
+                    const pct = (this.audio.currentTime / this.audio.duration) * 100;
+                    progressFill.style.width = pct + "%";
+                  }
+                });
+
+                this.audio.addEventListener("ended", () => this.stop());
+                this.audio.addEventListener("error", () => this.stop());
+                this.audio.play().catch(() => this.stop());
+
+                this.el.addEventListener("radio:stop", () => this.stop(), { once: true });
+              },
+
+              stop() {
+                if (this.audio) {
+                  this.audio.pause();
+                  this.audio.currentTime = 0;
+                  this.audio = null;
+                }
+                this.playing = false;
+                this.el.removeAttribute("data-playing");
+                const playBtn = this.el.querySelector("[data-play-btn]");
+                const progressFill = this.el.querySelector("[data-progress-fill]");
+                playBtn.classList.replace("bg-red-600", "bg-blue-600");
+                playBtn.classList.replace("hover:bg-red-500", "hover:bg-blue-500");
+                progressFill.style.width = "0%";
+              },
+
+              destroyed() {
+                this.stop();
+              }
+            }
+          </script>
+          
+<!-- Replay Controls -->
+          <div class="border-t border-gray-800 p-3 sm:p-4">
             <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Replay</h3>
             <div class="flex gap-2">
               <input
@@ -164,7 +535,7 @@
                 phx-click="start_replay"
                 class="px-3 py-1 text-sm bg-purple-700 hover:bg-purple-600 rounded"
               >
-                ▶ Replay
+                Replay
               </button>
             </div>
           </div>

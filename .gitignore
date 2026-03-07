@@ -35,3 +35,6 @@ f1_tracker-*.tar
 npm-debug.log
 /assets/node_modules/
 
+# Environment variables (secrets)
+.env
+

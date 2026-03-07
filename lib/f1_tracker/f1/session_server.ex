@@ -20,12 +20,12 @@ defmodule F1Tracker.F1.SessionServer do
 
   @doc "Start tracking a specific session"
   def track_session(session_key) do
-    GenServer.call(__MODULE__, {:track_session, session_key})
+    GenServer.cast(__MODULE__, {:track_session, session_key})
   end
 
   @doc "Stop tracking"
   def stop_tracking do
-    GenServer.call(__MODULE__, :stop_tracking)
+    GenServer.cast(__MODULE__, :stop_tracking)
   end
 
   @doc "Get current state snapshot"
@@ -40,7 +40,7 @@ defmodule F1Tracker.F1.SessionServer do
 
   @doc "Start replay from a specific timestamp"
   def replay_from(session_key, from_timestamp) do
-    GenServer.call(__MODULE__, {:replay_from, session_key, from_timestamp})
+    GenServer.cast(__MODULE__, {:replay_from, session_key, from_timestamp})
   end
 
   # -- Callbacks --
@@ -59,46 +59,47 @@ defmodule F1Tracker.F1.SessionServer do
       pit_stops: [],
       weather: nil,
       stints: %{},
+      best_sectors: %{s1: nil, s2: nil, s3: nil},
+      personal_best_sectors: %{},
+      drs: %{},
+      team_radio: [],
       last_location_ts: nil,
       last_lap_ts: nil,
       last_interval_ts: nil,
+      last_position_ts: nil,
+      last_drs_ts: nil,
+      last_radio_ts: nil,
       replay_mode: false,
-      replay_from: nil
+      replay_from: nil,
+      session_meta: nil
     }
 
     {:ok, state}
   end
 
   @impl true
-  def handle_call({:track_session, session_key}, _from, state) do
+  def handle_cast({:track_session, session_key}, state) do
     Logger.info("Starting to track session: #{session_key}")
+    # Kick off async driver fetch to avoid blocking
+    send(self(), {:init_session, session_key})
 
-    # Fetch initial driver data
-    drivers = fetch_drivers(session_key)
-
-    new_state = %{
-      state
-      | session_key: session_key,
-        tracking: true,
-        drivers: drivers,
-        replay_mode: false,
-        replay_from: nil
-    }
-
-    # Start polling
-    schedule_poll(:locations)
-    schedule_poll(:timing)
-    schedule_poll(:race_control)
-
-    broadcast("session:started", %{session_key: session_key, drivers: drivers})
-
-    {:reply, :ok, new_state}
+    {:noreply, reset_session_state(state, session_key)}
   end
 
   @impl true
-  def handle_call(:stop_tracking, _from, state) do
+  def handle_cast(:stop_tracking, state) do
     Logger.info("Stopping session tracking")
-    {:reply, :ok, %{state | tracking: false}}
+    {:noreply, %{state | tracking: false}}
+  end
+
+  @impl true
+  def handle_cast({:replay_from, session_key, from_timestamp}, state) do
+    Logger.info("Starting replay from #{from_timestamp} for session #{session_key}")
+    # Kick off async driver fetch + historical data fetch
+    send(self(), {:init_replay, session_key, from_timestamp})
+
+    new_state = reset_session_state(state, session_key)
+    {:noreply, %{new_state | replay_mode: true, replay_from: from_timestamp}}
   end
 
   @impl true
@@ -107,24 +108,48 @@ defmodule F1Tracker.F1.SessionServer do
   end
 
   @impl true
-  def handle_call({:replay_from, session_key, from_timestamp}, _from, state) do
-    Logger.info("Starting replay from #{from_timestamp} for session #{session_key}")
+  def handle_info({:init_session, session_key}, state) do
+    drivers = fetch_drivers(session_key)
+    session_meta = fetch_session_meta(session_key)
 
+    completed? =
+      case session_meta do
+        %{date_end: date_end} when not is_nil(date_end) -> session_ended?(date_end)
+        _ -> false
+      end
+
+    new_state = %{state | drivers: drivers, session_meta: session_meta}
+
+    if completed? do
+      Logger.info("Completed session detected, starting replay")
+      # Delegate to ReplayServer for completed sessions
+      F1Tracker.F1.ReplayServer.start_replay(session_key, session_meta, drivers)
+      broadcast("session:started", %{session_key: session_key, drivers: drivers})
+      {:noreply, new_state}
+    else
+      # Live session — start incremental polling
+      schedule_poll(:locations)
+      schedule_poll(:timing)
+      schedule_poll(:race_control)
+      broadcast("session:started", %{session_key: session_key, drivers: drivers})
+
+      # Fetch track outline in background for live sessions that have been running
+      send(self(), :fetch_track_outline)
+
+      {:noreply, new_state}
+    end
+  end
+
+  @impl true
+  def handle_info({:init_replay, session_key, from_timestamp}, state) do
     drivers = fetch_drivers(session_key)
 
-    new_state = %{
-      state
-      | session_key: session_key,
-        tracking: true,
-        drivers: drivers,
-        replay_mode: true,
-        replay_from: from_timestamp
-    }
+    broadcast("session:started", %{session_key: session_key, drivers: drivers})
 
     # Fetch historical data from that point
     send(self(), {:fetch_historical, from_timestamp})
 
-    {:reply, :ok, new_state}
+    {:noreply, %{state | drivers: drivers}}
   end
 
   @impl true
@@ -141,6 +166,19 @@ defmodule F1Tracker.F1.SessionServer do
           state
       end
 
+    # Fetch DRS data alongside locations
+    new_state =
+      case Client.get_car_data(build_params(sk, new_state.last_drs_ts)) do
+        {:ok, data} when is_list(data) and data != [] ->
+          drs = process_drs(data)
+          last_ts = get_latest_timestamp(data)
+          broadcast("drs:update", drs)
+          %{new_state | drs: drs, last_drs_ts: last_ts}
+
+        _ ->
+          new_state
+      end
+
     schedule_poll(:locations)
     {:noreply, new_state}
   end
@@ -155,8 +193,17 @@ defmodule F1Tracker.F1.SessionServer do
         {:ok, data} when is_list(data) and data != [] ->
           laps = process_laps(data, state.laps)
           last_ts = get_latest_timestamp(data)
+          {best_sectors, personal_best_sectors} = compute_best_sectors(laps)
           broadcast("laps:update", laps)
-          %{new_state | laps: laps, last_lap_ts: last_ts}
+          broadcast("sectors:update", %{best: best_sectors, personal: personal_best_sectors})
+
+          %{
+            new_state
+            | laps: laps,
+              last_lap_ts: last_ts,
+              best_sectors: best_sectors,
+              personal_best_sectors: personal_best_sectors
+          }
 
         _ ->
           new_state
@@ -177,11 +224,12 @@ defmodule F1Tracker.F1.SessionServer do
 
     # Fetch positions
     new_state =
-      case Client.get_position(build_params(sk, nil)) do
+      case Client.get_position(build_params(sk, state.last_position_ts)) do
         {:ok, data} when is_list(data) and data != [] ->
           positions = process_positions(data)
+          last_ts = get_latest_timestamp(data)
           broadcast("positions:update", positions)
-          %{new_state | positions: positions}
+          %{new_state | positions: positions, last_position_ts: last_ts}
 
         _ ->
           new_state
@@ -214,6 +262,31 @@ defmodule F1Tracker.F1.SessionServer do
           new_state
       end
 
+    # Fetch stints (tyre compound data)
+    new_state =
+      case Client.get_stints(%{session_key: sk}) do
+        {:ok, data} when is_list(data) and data != [] ->
+          stints = process_stints(data)
+          broadcast("stints:update", stints)
+          %{new_state | stints: stints}
+
+        _ ->
+          new_state
+      end
+
+    # Fetch team radio
+    new_state =
+      case Client.get_team_radio(build_params(sk, new_state.last_radio_ts)) do
+        {:ok, data} when is_list(data) and data != [] ->
+          radio = process_team_radio(data, new_state.team_radio)
+          last_ts = get_latest_timestamp(data)
+          broadcast("team_radio:update", radio)
+          %{new_state | team_radio: radio, last_radio_ts: last_ts}
+
+        _ ->
+          new_state
+      end
+
     schedule_poll(:race_control)
     {:noreply, new_state}
   end
@@ -229,7 +302,8 @@ defmodule F1Tracker.F1.SessionServer do
     Logger.info("Fetching historical data from #{from_timestamp}")
 
     # Fetch all data from the given timestamp
-    params = %{session_key: sk, date: ">#{from_timestamp}"}
+    # OpenF1 uses operator suffixes in param NAMES: date>, date<
+    params = [{"session_key", sk}, {"date>", from_timestamp}]
 
     with {:ok, laps} <- Client.get_laps(params),
          {:ok, positions} <- Client.get_position(params),
@@ -264,20 +338,132 @@ defmodule F1Tracker.F1.SessionServer do
     end
   end
 
+  @impl true
+  def handle_info(:fetch_track_outline, %{session_key: sk, drivers: drivers} = state)
+      when is_integer(sk) and map_size(drivers) > 0 do
+    # For live sessions, fetch a recent ~100s of one driver's location data
+    # to build a track outline. Use data from ~2 minutes ago to now.
+    now = DateTime.utc_now()
+    from = DateTime.add(now, -100, :second)
+    driver_num = drivers |> Map.keys() |> List.first()
+
+    if driver_num do
+      from_str = DateTime.to_iso8601(from)
+      to_str = DateTime.to_iso8601(now)
+
+      case Client.get_location_for_driver(sk, driver_num, from_str, to_str) do
+        {:ok, data} when is_list(data) and length(data) > 10 ->
+          outline = build_track_outline(data)
+
+          if outline != [] do
+            Logger.info("SessionServer fetched track outline: #{length(outline)} points")
+            broadcast("track_outline:update", outline)
+          end
+
+        _ ->
+          # Not enough data yet — retry in 30 seconds
+          Process.send_after(self(), :fetch_track_outline, 30_000)
+      end
+    end
+
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:fetch_track_outline, state), do: {:noreply, state}
+
   # -- Private Helpers --
+
+  defp build_track_outline(data) do
+    data
+    |> Enum.sort_by(& &1["date"])
+    |> Enum.reduce([], fn record, acc ->
+      x = record["x"]
+      y = record["y"]
+
+      case acc do
+        [] ->
+          [%{x: x, y: y}]
+
+        [prev | _] ->
+          dx = x - prev.x
+          dy = y - prev.y
+          dist = :math.sqrt(dx * dx + dy * dy)
+
+          cond do
+            dist < 20 -> acc
+            dist > 5000 -> acc
+            true -> [%{x: x, y: y} | acc]
+          end
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp reset_session_state(state, session_key) do
+    %{
+      state
+      | session_key: session_key,
+        tracking: true,
+        replay_mode: false,
+        replay_from: nil,
+        drivers: %{},
+        positions: [],
+        locations: %{},
+        laps: %{},
+        intervals: %{},
+        race_control: [],
+        weather: nil,
+        stints: %{},
+        best_sectors: %{s1: nil, s2: nil, s3: nil},
+        personal_best_sectors: %{},
+        drs: %{},
+        team_radio: [],
+        last_location_ts: nil,
+        last_lap_ts: nil,
+        last_interval_ts: nil,
+        last_position_ts: nil,
+        last_drs_ts: nil,
+        last_radio_ts: nil,
+        session_meta: nil
+    }
+  end
+
+  defp fetch_session_meta(session_key) do
+    case Client.get_sessions(%{session_key: session_key}) do
+      {:ok, [session | _]} ->
+        %{
+          date_start: session["date_start"],
+          date_end: session["date_end"],
+          session_type: session["session_type"],
+          session_name: session["session_name"]
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  defp session_ended?(date_end_str) do
+    case DateTime.from_iso8601(date_end_str) do
+      {:ok, dt, _} -> DateTime.compare(dt, DateTime.utc_now()) == :lt
+      _ -> false
+    end
+  end
 
   defp fetch_drivers(session_key) do
     case Client.get_drivers(%{session_key: session_key}) do
       {:ok, drivers} when is_list(drivers) ->
         Map.new(drivers, fn d ->
-          {d["driver_number"], %{
-            number: d["driver_number"],
-            code: d["name_acronym"],
-            full_name: d["full_name"],
-            team: d["team_name"],
-            team_colour: d["team_colour"],
-            headshot_url: d["headshot_url"]
-          }}
+          {d["driver_number"],
+           %{
+             number: d["driver_number"],
+             code: d["name_acronym"],
+             full_name: d["full_name"],
+             team: d["team_name"],
+             team_colour: d["team_colour"],
+             headshot_url: d["headshot_url"]
+           }}
         end)
 
       _ ->
@@ -291,12 +477,14 @@ defmodule F1Tracker.F1.SessionServer do
     |> Enum.group_by(& &1["driver_number"])
     |> Map.new(fn {driver_num, entries} ->
       latest = Enum.max_by(entries, & &1["date"])
-      {driver_num, %{
-        x: latest["x"],
-        y: latest["y"],
-        z: latest["z"],
-        date: latest["date"]
-      }}
+
+      {driver_num,
+       %{
+         x: latest["x"],
+         y: latest["y"],
+         z: latest["z"],
+         date: latest["date"]
+       }}
     end)
   end
 
@@ -324,11 +512,13 @@ defmodule F1Tracker.F1.SessionServer do
     |> Enum.group_by(& &1["driver_number"])
     |> Map.new(fn {driver_num, entries} ->
       latest = Enum.max_by(entries, & &1["date"])
-      {driver_num, %{
-        gap_to_leader: latest["gap_to_leader"],
-        interval: latest["interval"],
-        date: latest["date"]
-      }}
+
+      {driver_num,
+       %{
+         gap_to_leader: latest["gap_to_leader"],
+         interval: latest["interval"],
+         date: latest["date"]
+       }}
     end)
   end
 
@@ -342,8 +532,97 @@ defmodule F1Tracker.F1.SessionServer do
     |> Enum.sort_by(& &1.position)
   end
 
+  defp process_stints(data) do
+    # Group by driver, keep latest stint (highest stint_number) per driver
+    data
+    |> Enum.group_by(& &1["driver_number"])
+    |> Map.new(fn {driver_num, entries} ->
+      latest = Enum.max_by(entries, & &1["stint_number"])
+
+      {driver_num,
+       %{
+         compound: latest["compound"],
+         tyre_age: latest["tyre_age_at_start"],
+         stint_number: latest["stint_number"],
+         lap_start: latest["lap_start"],
+         lap_end: latest["lap_end"]
+       }}
+    end)
+  end
+
+  defp process_team_radio(data, existing_radio) do
+    new_entries =
+      Enum.map(data, fn r ->
+        %{
+          driver_number: r["driver_number"],
+          recording_url: r["recording_url"],
+          date: r["date"]
+        }
+      end)
+
+    # Append new entries, keep last 20
+    (existing_radio ++ new_entries)
+    |> Enum.uniq_by(& &1.recording_url)
+    |> Enum.take(-20)
+  end
+
+  defp process_drs(data) do
+    # Group by driver, keep latest DRS state per driver
+    # DRS values: 0-1 = off/unknown, 8 = eligible, 10-14 = active/open
+    data
+    |> Enum.group_by(& &1["driver_number"])
+    |> Map.new(fn {driver_num, entries} ->
+      latest = Enum.max_by(entries, & &1["date"])
+      drs_value = latest["drs"] || 0
+
+      {driver_num,
+       %{
+         drs: drs_value,
+         active: drs_value >= 10,
+         eligible: drs_value == 8,
+         speed: latest["speed"]
+       }}
+    end)
+  end
+
+  defp compute_best_sectors(laps) do
+    all_laps = laps |> Map.values() |> List.flatten()
+
+    best_sectors = %{
+      s1: all_laps |> Enum.map(& &1.sector_1) |> Enum.filter(& &1) |> Enum.min(fn -> nil end),
+      s2: all_laps |> Enum.map(& &1.sector_2) |> Enum.filter(& &1) |> Enum.min(fn -> nil end),
+      s3: all_laps |> Enum.map(& &1.sector_3) |> Enum.filter(& &1) |> Enum.min(fn -> nil end)
+    }
+
+    personal_best_sectors =
+      Map.new(laps, fn {driver_num, driver_laps} ->
+        {driver_num,
+         %{
+           s1:
+             driver_laps
+             |> Enum.map(& &1.sector_1)
+             |> Enum.filter(& &1)
+             |> Enum.min(fn -> nil end),
+           s2:
+             driver_laps
+             |> Enum.map(& &1.sector_2)
+             |> Enum.filter(& &1)
+             |> Enum.min(fn -> nil end),
+           s3:
+             driver_laps
+             |> Enum.map(& &1.sector_3)
+             |> Enum.filter(& &1)
+             |> Enum.min(fn -> nil end)
+         }}
+      end)
+
+    {best_sectors, personal_best_sectors}
+  end
+
   defp build_params(session_key, nil), do: %{session_key: session_key}
-  defp build_params(session_key, last_ts), do: %{session_key: session_key, date: ">#{last_ts}"}
+
+  defp build_params(session_key, last_ts),
+    do: [{"session_key", session_key}, {"date>", last_ts}]
 
   defp get_latest_timestamp(data) do
     data

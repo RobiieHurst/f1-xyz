@@ -91,12 +91,39 @@ defmodule F1Tracker.OpenF1.Client do
     get("/stints", params)
   end
 
+  @doc """
+  Fetch location data with a date range (two date params with different operators).
+  Accepts a keyword list of params to allow duplicate keys.
+  """
+  def get_location_range(session_key, from_iso, to_iso) do
+    # OpenF1 uses operator suffixes in param NAMES: date>, date<, date>=, date<=
+    # We use date> (exclusive) and date< (exclusive) to avoid overlap between chunks
+    params = [{"session_key", session_key}, {"date>", from_iso}, {"date<", to_iso}]
+    get("/location", params)
+  end
+
+  @doc """
+  Fetch location data for a single driver in a date range.
+  Used to build the track outline from one car's trajectory.
+  """
+  def get_location_for_driver(session_key, driver_number, from_iso, to_iso) do
+    params = [
+      {"session_key", session_key},
+      {"driver_number", driver_number},
+      {"date>", from_iso},
+      {"date<", to_iso}
+    ]
+
+    get("/location", params)
+  end
+
   # -- Private --
 
   defp get(path, params) do
     url = @base_url <> path
+    headers = auth_headers()
 
-    case Req.get(url, params: params) do
+    case Req.get(url, params: params, headers: headers) do
       {:ok, %Req.Response{status: 200, body: body}} ->
         {:ok, body}
 
@@ -105,6 +132,13 @@ defmodule F1Tracker.OpenF1.Client do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp auth_headers do
+    case F1Tracker.OpenF1.TokenManager.get_token() do
+      nil -> []
+      token -> [{"authorization", "Bearer #{token}"}]
     end
   end
 end

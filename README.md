@@ -69,12 +69,12 @@ Then import MAPP in your JS. The app falls back to a canvas renderer if MAPP isn
 
 ## TODO
 
-- [ ] Proper MAPP layer with circuit GeoJSON overlay
-- [ ] Tyre compound indicators in timing tower
-- [ ] Sector time colouring (purple/green/yellow)
-- [ ] Driver headshot images
-- [ ] Smooth car position interpolation (lerp between updates)
-- [ ] Historical session browser with search/filter
-- [ ] DRS detection zones on track map
-- [ ] Team radio playback integration
-- [ ] Mobile-responsive layout
+- [x] Proper MAPP layer with circuit GeoJSON overlay
+- [x] Tyre compound indicators in timing tower
+- [x] Sector time colouring (purple/green/yellow)
+- [x] Driver headshot images
+- [x] Smooth car position interpolation (lerp between updates)
+- [x] Historical session browser with search/filter
+- [x] DRS detection zones on track map
+- [x] Team radio playback integration
+- [x] Mobile-responsive layout
