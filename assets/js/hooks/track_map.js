@@ -2,6 +2,8 @@ const LERP_DURATION_MS = 500;
 const TELEPORT_THRESHOLD = 5000;
 const MAX_TRAIL_POINTS = 1000;
 const MIN_TRAIL_DISTANCE = 35;
+const MAX_TRACK_CLOUD_POINTS = 6000;
+const TRACK_CLOUD_CELL = 70;
 
 const DEFAULT_ANCHOR = [2.3522, 48.8566];
 const MIN_FRAME_RANGE = 800;
@@ -79,6 +81,8 @@ const TrackMap = {
     this.carStates = {};
     this.trackOutline = [];
     this.trackTrail = [];
+    this.trackCloud = [];
+    this.trackCloudCells = new Set();
     this.trailDriver = null;
 
     this.sessionMeta = null;
@@ -145,6 +149,8 @@ const TrackMap = {
     this.carStates = {};
     this.trackOutline = [];
     this.trackTrail = [];
+    this.trackCloud = [];
+    this.trackCloudCells = new Set();
     this.trailDriver = null;
     this.localFrame = null;
     this.hasFitView = false;
@@ -472,19 +478,49 @@ const TrackMap = {
     }
 
     const loc = locations[this.trailDriver];
-    if (!loc || loc.x == null || loc.y == null) return;
+    if (!loc || loc.x == null || loc.y == null) {
+      this.addToTrackCloud(locations);
+      return;
+    }
 
     if (this.trackTrail.length > 0) {
       const last = this.trackTrail[this.trackTrail.length - 1];
       const dx = loc.x - last.x;
       const dy = loc.y - last.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < MIN_TRAIL_DISTANCE || dist > TELEPORT_THRESHOLD) return;
+      if (dist < MIN_TRAIL_DISTANCE) {
+        this.addToTrackCloud(locations);
+        return;
+      }
+
+      // For big jumps, start a new segment by accepting the point anyway.
     }
 
     this.trackTrail.push({ x: loc.x, y: loc.y });
     if (this.trackTrail.length > MAX_TRAIL_POINTS) {
       this.trackTrail = this.trackTrail.slice(-MAX_TRAIL_POINTS);
+    }
+
+    this.addToTrackCloud(locations);
+  },
+
+  addToTrackCloud(locations) {
+    for (const loc of Object.values(locations)) {
+      if (!loc || loc.x == null || loc.y == null) continue;
+
+      const gx = Math.round(loc.x / TRACK_CLOUD_CELL);
+      const gy = Math.round(loc.y / TRACK_CLOUD_CELL);
+      const key = `${gx}:${gy}`;
+
+      if (this.trackCloudCells.has(key)) continue;
+
+      this.trackCloudCells.add(key);
+      this.trackCloud.push({ x: loc.x, y: loc.y, key });
+
+      if (this.trackCloud.length > MAX_TRACK_CLOUD_POINTS) {
+        const removed = this.trackCloud.shift();
+        if (removed) this.trackCloudCells.delete(removed.key);
+      }
     }
   },
 
@@ -683,8 +719,16 @@ const TrackMap = {
     }
 
     const trackPath = this.getTrackPath();
-    const xs = [...entries.map(([, c]) => c.current.x), ...trackPath.map((p) => p.x)];
-    const ys = [...entries.map(([, c]) => c.current.y), ...trackPath.map((p) => p.y)];
+    const xs = [
+      ...entries.map(([, c]) => c.current.x),
+      ...trackPath.map((p) => p.x),
+      ...this.trackCloud.map((p) => p.x),
+    ];
+    const ys = [
+      ...entries.map(([, c]) => c.current.y),
+      ...trackPath.map((p) => p.y),
+      ...this.trackCloud.map((p) => p.y),
+    ];
     const minX = Math.min(...xs);
     const maxX = Math.max(...xs);
     const minY = Math.min(...ys);
@@ -759,6 +803,17 @@ const TrackMap = {
       ctx.font = `bold ${Math.max(8, 10 * this.viewZoom)}px monospace`;
       ctx.textAlign = "left";
       ctx.fillText("S/F", firstT.x + 8, firstT.y - 8);
+    } else if (this.trackCloud.length > 0) {
+      // Fallback: draw track density cloud while full outline is unavailable.
+      ctx.fillStyle = "rgba(125, 140, 165, 0.35)";
+      for (const pt of this.trackCloud) {
+        const px0 = (pt.x - minX) * scale + offsetX;
+        const py0 = (pt.y - minY) * scale + offsetY;
+        const t = transformScreen(px0, py0);
+        ctx.beginPath();
+        ctx.arc(t.x, t.y, Math.max(1.5, 2 * this.viewZoom), 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
 
     for (const [, car] of entries) {
@@ -790,6 +845,11 @@ const TrackMap = {
     ctx.font = "11px sans-serif";
     ctx.fillStyle = "rgba(180,180,180,0.8)";
     ctx.fillText("Scroll: zoom | Drag: pan | Double-click: reset", 12, 38);
+
+    if (trackPath.length <= 1 && this.trackCloud.length > 0) {
+      ctx.fillStyle = "rgba(180,180,180,0.7)";
+      ctx.fillText("Building track outline...", 12, 56);
+    }
   },
 
   destroyed() {
