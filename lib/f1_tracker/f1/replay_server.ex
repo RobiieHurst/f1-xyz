@@ -16,7 +16,8 @@ defmodule F1Tracker.F1.ReplayServer do
   use GenServer
   require Logger
 
-  alias F1Tracker.OpenF1.Client
+  alias F1Tracker.DataProvider
+  alias F1Tracker.F1.TrackOutlineCache
 
   @pubsub F1Tracker.PubSub
   # Real-time interval between replay ticks
@@ -230,9 +231,21 @@ defmodule F1Tracker.F1.ReplayServer do
         personal_best_sectors: personal_best_sectors
     }
 
-    # Fetch track outline from a single driver's lap trajectory
-    Process.sleep(500)
-    track_outline = fetch_track_outline(sk, session_start, state.drivers)
+    # Use cached outline first, then fallback to API fetch.
+    cached_outline = get_cached_outline(state.session_meta)
+
+    track_outline =
+      if cached_outline != [] do
+        cached_outline
+      else
+        Process.sleep(500)
+        fetch_track_outline(sk, session_start, state.drivers)
+      end
+
+    if cached_outline == [] and track_outline != [] do
+      cache_outline(state.session_meta, track_outline)
+    end
+
     Logger.info("ReplayServer track outline: #{length(track_outline)} points")
 
     # Broadcast static data
@@ -277,6 +290,7 @@ defmodule F1Tracker.F1.ReplayServer do
         if outline != [] do
           Logger.info("ReplayServer built track outline from chunk: #{length(outline)} points")
           broadcast("track_outline:update", outline)
+          cache_outline(state.session_meta, outline)
           outline
         else
           []
@@ -534,7 +548,7 @@ defmodule F1Tracker.F1.ReplayServer do
     from_str = DateTime.to_iso8601(from_dt)
     to_str = DateTime.to_iso8601(to_dt)
 
-    case Client.get_location_range(session_key, from_str, to_str) do
+    case DataProvider.get_location_range(session_key, from_str, to_str) do
       {:ok, data} when is_list(data) -> data
       _ -> []
     end
@@ -569,9 +583,9 @@ defmodule F1Tracker.F1.ReplayServer do
     drivers
     |> Map.keys()
     |> Enum.sort()
-    |> Enum.take(6)
+    |> Enum.take(12)
     |> Enum.reduce_while([], fn driver_num, _acc ->
-      case Client.get_location_for_driver(session_key, driver_num, from_str, to_str) do
+      case DataProvider.get_location_for_driver(session_key, driver_num, from_str, to_str) do
         {:ok, data} when is_list(data) and length(data) > 100 ->
           outline = build_clean_outline(data)
 
@@ -600,57 +614,111 @@ defmodule F1Tracker.F1.ReplayServer do
   end
 
   defp build_clean_outline(data) do
-    data
-    |> Enum.sort_by(& &1["date"])
-    |> Enum.reduce([], fn record, acc ->
-      x = record["x"]
-      y = record["y"]
+    outline =
+      data
+      |> Enum.sort_by(& &1["date"])
+      |> Enum.reduce([], fn record, acc ->
+        x = record["x"]
+        y = record["y"]
 
-      case acc do
-        [] ->
-          [%{x: x, y: y}]
+        case acc do
+          [] ->
+            [%{x: x, y: y}]
 
-        [prev | _] ->
-          dx = x - prev.x
-          dy = y - prev.y
-          dist = :math.sqrt(dx * dx + dy * dy)
+          [prev | _] ->
+            dx = x - prev.x
+            dy = y - prev.y
+            dist = :math.sqrt(dx * dx + dy * dy)
 
-          # Skip if too close (clustering) or too far (pit teleport)
-          cond do
-            dist < 20 -> acc
-            dist > 5000 -> acc
-            true -> [%{x: x, y: y} | acc]
-          end
-      end
-    end)
-    |> Enum.reverse()
+            # Skip if too close (clustering) or too far (pit teleport)
+            cond do
+              dist < 20 -> acc
+              dist > 5000 -> acc
+              true -> [%{x: x, y: y} | acc]
+            end
+        end
+      end)
+      |> Enum.reverse()
+
+    maybe_extract_closed_segment(outline)
   end
 
   defp valid_outline?(outline) do
     if length(outline) < 120 do
       false
     else
-      first = hd(outline)
-      last = List.last(outline)
-      dx = first.x - last.x
-      dy = first.y - last.y
-      closure_dist = :math.sqrt(dx * dx + dy * dy)
+      xs = Enum.map(outline, & &1.x)
+      ys = Enum.map(outline, & &1.y)
+      range_x = Enum.max(xs) - Enum.min(xs)
+      range_y = Enum.max(ys) - Enum.min(ys)
 
-      closure_dist < 1_200
+      max(range_x, range_y) > 2_000
     end
   end
+
+  defp maybe_extract_closed_segment(points) do
+    n = length(points)
+
+    if n < 200 do
+      points
+    else
+      by_idx = points |> Enum.with_index() |> Map.new(fn {p, i} -> {i, p} end)
+
+      max_start = min(n - 120, 60)
+
+      best =
+        Enum.reduce(0..max_start, {nil, nil, :infinity}, fn i, {bi, bj, bd} ->
+          start = Map.fetch!(by_idx, i)
+
+          {candidate_j, candidate_d} =
+            Enum.reduce((i + 80)..(n - 1), {nil, bd}, fn j, {cj, cd} ->
+              pt = Map.fetch!(by_idx, j)
+              dx = start.x - pt.x
+              dy = start.y - pt.y
+              d = :math.sqrt(dx * dx + dy * dy)
+
+              if d < cd, do: {j, d}, else: {cj, cd}
+            end)
+
+          if candidate_j != nil and candidate_d < bd do
+            {i, candidate_j, candidate_d}
+          else
+            {bi, bj, bd}
+          end
+        end)
+
+      case best do
+        {i, j, d} when not is_nil(i) and not is_nil(j) and d < 800 ->
+          Enum.slice(points, i..j)
+
+        _ ->
+          points
+      end
+    end
+  end
+
+  defp get_cached_outline(%{circuit_key: key}) when is_integer(key),
+    do: TrackOutlineCache.get(key)
+
+  defp get_cached_outline(_), do: []
+
+  defp cache_outline(%{circuit_key: key}, outline) when is_integer(key) and is_list(outline) do
+    TrackOutlineCache.put(key, outline)
+  end
+
+  defp cache_outline(_, _), do: :ok
 
   # -- Private: Data Fetching --
 
   defp fetch_all_positions(params) do
-    case Client.get_position(params) do
+    case DataProvider.get_position(params) do
       {:ok, data} when is_list(data) -> data
       _ -> []
     end
   end
 
   defp fetch_all_laps(params) do
-    case Client.get_laps(params) do
+    case DataProvider.get_laps(params) do
       {:ok, data} when is_list(data) ->
         Enum.reduce(data, %{}, fn lap, acc ->
           driver_num = lap["driver_number"]
@@ -675,14 +743,14 @@ defmodule F1Tracker.F1.ReplayServer do
   end
 
   defp fetch_all_intervals(params) do
-    case Client.get_intervals(params) do
+    case DataProvider.get_intervals(params) do
       {:ok, data} when is_list(data) -> data
       _ -> []
     end
   end
 
   defp fetch_all_stints(params) do
-    case Client.get_stints(params) do
+    case DataProvider.get_stints(params) do
       {:ok, data} when is_list(data) and data != [] ->
         data
         |> Enum.group_by(& &1["driver_number"])
@@ -705,21 +773,21 @@ defmodule F1Tracker.F1.ReplayServer do
   end
 
   defp fetch_latest_weather(params) do
-    case Client.get_weather(params) do
+    case DataProvider.get_weather(params) do
       {:ok, [latest | _]} -> latest
       _ -> nil
     end
   end
 
   defp fetch_race_control(params) do
-    case Client.get_race_control(params) do
+    case DataProvider.get_race_control(params) do
       {:ok, data} when is_list(data) -> data
       _ -> []
     end
   end
 
   defp fetch_team_radio(params) do
-    case Client.get_team_radio(params) do
+    case DataProvider.get_team_radio(params) do
       {:ok, data} when is_list(data) and data != [] ->
         data
         |> Enum.map(fn r ->

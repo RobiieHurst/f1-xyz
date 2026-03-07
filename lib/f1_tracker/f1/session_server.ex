@@ -6,7 +6,8 @@ defmodule F1Tracker.F1.SessionServer do
   use GenServer
   require Logger
 
-  alias F1Tracker.OpenF1.Client
+  alias F1Tracker.DataProvider
+  alias F1Tracker.F1.TrackOutlineCache
 
   @poll_interval_ms 5_000
   @location_poll_ms 2_000
@@ -35,7 +36,7 @@ defmodule F1Tracker.F1.SessionServer do
 
   @doc "List available sessions"
   def list_sessions do
-    Client.get_sessions()
+    DataProvider.get_sessions()
   end
 
   @doc "Start replay from a specific timestamp"
@@ -113,6 +114,7 @@ defmodule F1Tracker.F1.SessionServer do
   def handle_info({:init_session, session_key}, state) do
     drivers = fetch_drivers(session_key)
     session_meta = fetch_session_meta(session_key)
+    cached_outline = get_cached_outline(session_meta)
 
     completed? =
       case session_meta do
@@ -120,7 +122,12 @@ defmodule F1Tracker.F1.SessionServer do
         _ -> false
       end
 
-    new_state = %{state | drivers: drivers, session_meta: session_meta}
+    new_state = %{
+      state
+      | drivers: drivers,
+        session_meta: session_meta,
+        track_outline: cached_outline
+    }
 
     if completed? do
       Logger.info("Completed session detected, starting replay")
@@ -132,6 +139,10 @@ defmodule F1Tracker.F1.SessionServer do
         drivers: drivers,
         session_meta: session_meta
       })
+
+      if cached_outline != [] do
+        broadcast("track_outline:update", cached_outline)
+      end
 
       {:noreply, new_state}
     else
@@ -146,8 +157,12 @@ defmodule F1Tracker.F1.SessionServer do
         session_meta: session_meta
       })
 
-      # Fetch track outline in background for live sessions that have been running
-      send(self(), :fetch_track_outline)
+      if cached_outline != [] do
+        broadcast("track_outline:update", cached_outline)
+      else
+        # Fetch track outline in background for live sessions that have been running
+        send(self(), :fetch_track_outline)
+      end
 
       now_iso = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
       {:noreply, %{new_state | last_race_control_ts: now_iso}}
@@ -158,6 +173,7 @@ defmodule F1Tracker.F1.SessionServer do
   def handle_info({:init_replay, session_key, from_timestamp}, state) do
     drivers = fetch_drivers(session_key)
     session_meta = fetch_session_meta(session_key)
+    cached_outline = get_cached_outline(session_meta)
 
     broadcast("session:started", %{
       session_key: session_key,
@@ -165,16 +181,21 @@ defmodule F1Tracker.F1.SessionServer do
       session_meta: session_meta
     })
 
+    if cached_outline != [] do
+      broadcast("track_outline:update", cached_outline)
+    end
+
     # Fetch historical data from that point
     send(self(), {:fetch_historical, from_timestamp})
 
-    {:noreply, %{state | drivers: drivers, session_meta: session_meta}}
+    {:noreply,
+     %{state | drivers: drivers, session_meta: session_meta, track_outline: cached_outline}}
   end
 
   @impl true
   def handle_info({:poll, :locations}, %{tracking: true, session_key: sk} = state) do
     new_state =
-      case Client.get_location(build_params(sk, state.last_location_ts)) do
+      case DataProvider.get_location(build_params(sk, state.last_location_ts)) do
         {:ok, data} when is_list(data) and data != [] ->
           locations = process_locations(data)
           last_ts = get_latest_timestamp(data)
@@ -187,7 +208,7 @@ defmodule F1Tracker.F1.SessionServer do
 
     # Fetch DRS data alongside locations
     new_state =
-      case Client.get_car_data(build_params(sk, new_state.last_drs_ts)) do
+      case DataProvider.get_car_data(build_params(sk, new_state.last_drs_ts)) do
         {:ok, data} when is_list(data) and data != [] ->
           drs = process_drs(data)
           last_ts = get_latest_timestamp(data)
@@ -208,7 +229,7 @@ defmodule F1Tracker.F1.SessionServer do
 
     # Fetch laps
     new_state =
-      case Client.get_laps(build_params(sk, state.last_lap_ts)) do
+      case DataProvider.get_laps(build_params(sk, state.last_lap_ts)) do
         {:ok, data} when is_list(data) and data != [] ->
           laps = process_laps(data, state.laps)
           last_ts = get_latest_timestamp(data)
@@ -230,7 +251,7 @@ defmodule F1Tracker.F1.SessionServer do
 
     # Fetch intervals
     new_state =
-      case Client.get_intervals(build_params(sk, state.last_interval_ts)) do
+      case DataProvider.get_intervals(build_params(sk, state.last_interval_ts)) do
         {:ok, data} when is_list(data) and data != [] ->
           intervals = process_intervals(data)
           last_ts = get_latest_timestamp(data)
@@ -243,7 +264,7 @@ defmodule F1Tracker.F1.SessionServer do
 
     # Fetch positions
     new_state =
-      case Client.get_position(build_params(sk, state.last_position_ts)) do
+      case DataProvider.get_position(build_params(sk, state.last_position_ts)) do
         {:ok, data} when is_list(data) and data != [] ->
           positions = process_positions(data)
           last_ts = get_latest_timestamp(data)
@@ -261,7 +282,7 @@ defmodule F1Tracker.F1.SessionServer do
   @impl true
   def handle_info({:poll, :race_control}, %{tracking: true, session_key: sk} = state) do
     new_state =
-      case Client.get_race_control(build_params(sk, state.last_race_control_ts)) do
+      case DataProvider.get_race_control(build_params(sk, state.last_race_control_ts)) do
         {:ok, data} when is_list(data) and data != [] ->
           merged =
             (state.race_control ++ data)
@@ -280,7 +301,7 @@ defmodule F1Tracker.F1.SessionServer do
 
     # Also fetch weather
     new_state =
-      case Client.get_weather(%{session_key: sk}) do
+      case DataProvider.get_weather(%{session_key: sk}) do
         {:ok, [latest | _]} ->
           broadcast("weather:update", latest)
           %{new_state | weather: latest}
@@ -291,7 +312,7 @@ defmodule F1Tracker.F1.SessionServer do
 
     # Fetch stints (tyre compound data)
     new_state =
-      case Client.get_stints(%{session_key: sk}) do
+      case DataProvider.get_stints(%{session_key: sk}) do
         {:ok, data} when is_list(data) and data != [] ->
           stints = process_stints(data)
           broadcast("stints:update", stints)
@@ -303,7 +324,7 @@ defmodule F1Tracker.F1.SessionServer do
 
     # Fetch team radio
     new_state =
-      case Client.get_team_radio(build_params(sk, new_state.last_radio_ts)) do
+      case DataProvider.get_team_radio(build_params(sk, new_state.last_radio_ts)) do
         {:ok, data} when is_list(data) and data != [] ->
           radio = process_team_radio(data, new_state.team_radio)
           last_ts = get_latest_timestamp(data)
@@ -332,9 +353,9 @@ defmodule F1Tracker.F1.SessionServer do
     # OpenF1 uses operator suffixes in param NAMES: date>, date<
     params = [{"session_key", sk}, {"date>", from_timestamp}]
 
-    with {:ok, laps} <- Client.get_laps(params),
-         {:ok, positions} <- Client.get_position(params),
-         {:ok, locations} <- Client.get_location(params) do
+    with {:ok, laps} <- DataProvider.get_laps(params),
+         {:ok, positions} <- DataProvider.get_position(params),
+         {:ok, locations} <- DataProvider.get_location(params) do
       processed_laps = process_laps(laps, %{})
       processed_positions = process_positions(positions)
       processed_locations = process_locations(locations)
@@ -380,6 +401,7 @@ defmodule F1Tracker.F1.SessionServer do
     if outline != [] do
       Logger.info("SessionServer fetched track outline: #{length(outline)} points")
       broadcast("track_outline:update", outline)
+      cache_outline(state.session_meta, outline)
       {:noreply, %{state | track_outline: outline}}
     else
       # Not enough usable data yet — retry in 30 seconds
@@ -419,6 +441,8 @@ defmodule F1Tracker.F1.SessionServer do
       end)
       |> Enum.reverse()
 
+    outline = maybe_extract_closed_segment(outline)
+
     if valid_outline?(outline), do: outline, else: []
   end
 
@@ -426,9 +450,9 @@ defmodule F1Tracker.F1.SessionServer do
     drivers
     |> Map.keys()
     |> Enum.sort()
-    |> Enum.take(6)
+    |> Enum.take(12)
     |> Enum.reduce_while([], fn driver_num, _acc ->
-      case Client.get_location_for_driver(session_key, driver_num, from_str, to_str) do
+      case DataProvider.get_location_for_driver(session_key, driver_num, from_str, to_str) do
         {:ok, data} when is_list(data) and length(data) > 100 ->
           outline = build_track_outline(data)
 
@@ -448,15 +472,66 @@ defmodule F1Tracker.F1.SessionServer do
     if length(outline) < 120 do
       false
     else
-      first = hd(outline)
-      last = List.last(outline)
-      dx = first.x - last.x
-      dy = first.y - last.y
-      closure_dist = :math.sqrt(dx * dx + dy * dy)
+      xs = Enum.map(outline, & &1.x)
+      ys = Enum.map(outline, & &1.y)
+      range_x = Enum.max(xs) - Enum.min(xs)
+      range_y = Enum.max(ys) - Enum.min(ys)
 
-      closure_dist < 1_200
+      max(range_x, range_y) > 2_000
     end
   end
+
+  defp maybe_extract_closed_segment(points) do
+    n = length(points)
+
+    if n < 200 do
+      points
+    else
+      by_idx = points |> Enum.with_index() |> Map.new(fn {p, i} -> {i, p} end)
+
+      max_start = min(n - 120, 60)
+
+      best =
+        Enum.reduce(0..max_start, {nil, nil, :infinity}, fn i, {bi, bj, bd} ->
+          start = Map.fetch!(by_idx, i)
+
+          {candidate_j, candidate_d} =
+            Enum.reduce((i + 80)..(n - 1), {nil, bd}, fn j, {cj, cd} ->
+              pt = Map.fetch!(by_idx, j)
+              dx = start.x - pt.x
+              dy = start.y - pt.y
+              d = :math.sqrt(dx * dx + dy * dy)
+
+              if d < cd, do: {j, d}, else: {cj, cd}
+            end)
+
+          if candidate_j != nil and candidate_d < bd do
+            {i, candidate_j, candidate_d}
+          else
+            {bi, bj, bd}
+          end
+        end)
+
+      case best do
+        {i, j, d} when not is_nil(i) and not is_nil(j) and d < 800 ->
+          Enum.slice(points, i..j)
+
+        _ ->
+          points
+      end
+    end
+  end
+
+  defp get_cached_outline(%{circuit_key: key}) when is_integer(key),
+    do: TrackOutlineCache.get(key)
+
+  defp get_cached_outline(_), do: []
+
+  defp cache_outline(%{circuit_key: key}, outline) when is_integer(key) and is_list(outline) do
+    TrackOutlineCache.put(key, outline)
+  end
+
+  defp cache_outline(_, _), do: :ok
 
   defp reset_session_state(state, session_key) do
     %{
@@ -490,17 +565,22 @@ defmodule F1Tracker.F1.SessionServer do
   end
 
   defp fetch_session_meta(session_key) do
-    case Client.get_sessions(%{session_key: session_key}) do
+    case DataProvider.get_sessions(%{session_key: session_key}) do
       {:ok, [session | _]} ->
+        circuit_image = fetch_circuit_image(session)
+
         %{
           date_start: session["date_start"],
           date_end: session["date_end"],
           session_type: session["session_type"],
           session_name: session["session_name"],
+          meeting_key: session["meeting_key"],
+          year: session["year"],
           circuit_key: session["circuit_key"],
           circuit_short_name: session["circuit_short_name"],
           country_name: session["country_name"],
-          location: session["location"]
+          location: session["location"],
+          circuit_image: circuit_image
         }
 
       _ ->
@@ -515,8 +595,36 @@ defmodule F1Tracker.F1.SessionServer do
     end
   end
 
+  defp fetch_circuit_image(session) do
+    meeting_key = session["meeting_key"]
+
+    image_from_meeting_key =
+      case meeting_key do
+        key when is_integer(key) ->
+          case DataProvider.get_meetings(%{meeting_key: key}) do
+            {:ok, [meeting | _]} -> meeting["circuit_image"]
+            _ -> nil
+          end
+
+        _ ->
+          nil
+      end
+
+    if is_binary(image_from_meeting_key) and image_from_meeting_key != "" do
+      image_from_meeting_key
+    else
+      case DataProvider.get_meetings(%{
+             year: session["year"],
+             circuit_key: session["circuit_key"]
+           }) do
+        {:ok, [meeting | _]} -> meeting["circuit_image"]
+        _ -> nil
+      end
+    end
+  end
+
   defp fetch_drivers(session_key) do
-    case Client.get_drivers(%{session_key: session_key}) do
+    case DataProvider.get_drivers(%{session_key: session_key}) do
       {:ok, drivers} when is_list(drivers) ->
         Map.new(drivers, fn d ->
           {d["driver_number"],

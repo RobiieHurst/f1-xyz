@@ -55,3 +55,9 @@ Make driver locations and circuit overlays accurate and understandable by combin
 - [ ] Timing tower shows sane lap values (no multi-minute anomalies in qualifying).
 - [ ] Session switching clears stale drivers/track state.
 - [ ] `mix precommit` passes.
+
+## Prewarm Cache Command
+
+- `mix f1.prewarm_track_outlines`
+- `mix f1.prewarm_track_outlines --years 2025,2024`
+- `mix f1.prewarm_track_outlines --years 2025 --force`

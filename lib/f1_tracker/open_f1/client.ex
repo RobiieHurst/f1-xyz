@@ -36,6 +36,13 @@ defmodule F1Tracker.OpenF1.Client do
   end
 
   @doc """
+  Fetch meetings (event-level metadata, including circuit image).
+  """
+  def get_meetings(params \\ %{}) do
+    get("/meetings", params)
+  end
+
+  @doc """
   Fetch position/ranking data.
   """
   def get_position(params \\ %{}) do

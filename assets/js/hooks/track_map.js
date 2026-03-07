@@ -84,6 +84,8 @@ const TrackMap = {
     this.trackCloud = [];
     this.trackCloudCells = new Set();
     this.trailDriver = null;
+    this.circuitImage = null;
+    this.circuitImageLoaded = false;
 
     this.sessionMeta = null;
     this.localFrame = null;
@@ -113,6 +115,7 @@ const TrackMap = {
       this.localFrame = null;
       this.hasFitView = false;
       this.userMovedMap = false;
+      this.loadCircuitImage(session?.circuit_image);
       this.updateHud();
 
       if (this.olMap) {
@@ -159,6 +162,8 @@ const TrackMap = {
     this.viewPanX = 0;
     this.viewPanY = 0;
     this.isDragging = false;
+    this.circuitImage = null;
+    this.circuitImageLoaded = false;
 
     if (this.trackSource) {
       this.trackSource.clear();
@@ -318,6 +323,31 @@ const TrackMap = {
     } else {
       this.hudEl.textContent = base;
     }
+  },
+
+  loadCircuitImage(imageUrl) {
+    if (!imageUrl || typeof imageUrl !== "string") {
+      this.circuitImage = null;
+      this.circuitImageLoaded = false;
+      return;
+    }
+
+    const img = new Image();
+    img.decoding = "async";
+    img.loading = "eager";
+    img.crossOrigin = "anonymous";
+
+    img.onload = () => {
+      this.circuitImage = img;
+      this.circuitImageLoaded = true;
+    };
+
+    img.onerror = () => {
+      this.circuitImage = null;
+      this.circuitImageLoaded = false;
+    };
+
+    img.src = imageUrl;
   },
 
   getCircuitKey() {
@@ -814,6 +844,28 @@ const TrackMap = {
         ctx.arc(t.x, t.y, Math.max(1.5, 2 * this.viewZoom), 0, Math.PI * 2);
         ctx.fill();
       }
+    }
+
+    if (this.circuitImageLoaded && this.circuitImage) {
+      const trackWidthPx = rangeX * scale;
+      const trackHeightPx = rangeY * scale;
+      const targetW = trackWidthPx * 1.15;
+      const targetH = trackHeightPx * 1.15;
+
+      const imgW = this.circuitImage.width || 1;
+      const imgH = this.circuitImage.height || 1;
+      const ratio = Math.min(targetW / imgW, targetH / imgH);
+
+      const drawW = imgW * ratio * this.viewZoom;
+      const drawH = imgH * ratio * this.viewZoom;
+
+      const cx = w / 2 + this.viewPanX;
+      const cy = h / 2 + this.viewPanY;
+
+      ctx.save();
+      ctx.globalAlpha = 0.16;
+      ctx.drawImage(this.circuitImage, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
+      ctx.restore();
     }
 
     for (const [, car] of entries) {

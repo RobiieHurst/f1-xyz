@@ -8,7 +8,8 @@
 import Config
 
 config :f1_tracker,
-  generators: [timestamp_type: :utc_datetime]
+  generators: [timestamp_type: :utc_datetime],
+  data_provider: F1Tracker.DataProviders.OpenF1
 
 # Configure the endpoint
 config :f1_tracker, F1TrackerWeb.Endpoint,
