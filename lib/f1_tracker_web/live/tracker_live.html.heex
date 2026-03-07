@@ -1,0 +1,175 @@
+<div class="min-h-screen bg-gray-950 text-white">
+  <!-- Header -->
+  <header class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <h1 class="text-xl font-bold text-red-500">🏎️ F1 Tracker</h1>
+      <%= if @tracking do %>
+        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-green-900 text-green-300">
+          <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
+          LIVE
+        </span>
+      <% end %>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <%= if @weather do %>
+        <div class="text-sm text-gray-400">
+          🌡️ <%= @weather["air_temperature"] %>°C
+          💨 <%= @weather["wind_speed"] %> km/h
+          💧 <%= @weather["humidity"] %>%
+        </div>
+      <% end %>
+
+      <%= if @tracking do %>
+        <button phx-click="stop_tracking" class="px-3 py-1.5 text-sm bg-red-700 hover:bg-red-600 rounded">
+          Stop
+        </button>
+      <% else %>
+        <button phx-click="load_sessions" class="px-3 py-1.5 text-sm bg-blue-700 hover:bg-blue-600 rounded">
+          Load Sessions
+        </button>
+      <% end %>
+    </div>
+  </header>
+
+  <div class="flex h-[calc(100vh-56px)]">
+    <!-- Session Picker (sidebar when not tracking) -->
+    <%= if !@tracking and @sessions != [] do %>
+      <aside class="w-80 bg-gray-900 border-r border-gray-800 overflow-y-auto p-4">
+        <h2 class="text-sm font-semibold text-gray-400 uppercase mb-3">Sessions</h2>
+        <div class="space-y-2">
+          <%= for session <- @sessions do %>
+            <button
+              phx-click="track_session"
+              phx-value-session_key={session.session_key}
+              class="w-full text-left p-3 rounded-lg bg-gray-800 hover:bg-gray-700 transition"
+            >
+              <div class="font-semibold text-sm"><%= session.circuit %> — <%= session.name %></div>
+              <div class="text-xs text-gray-400"><%= session.country %> · <%= session.year %></div>
+              <div class="text-xs text-gray-500 mt-1"><%= session.date %></div>
+            </button>
+          <% end %>
+        </div>
+      </aside>
+    <% end %>
+
+    <!-- Main Content -->
+    <main class="flex-1 flex">
+      <!-- Track Map -->
+      <div class="flex-1 relative" id="track-map" phx-hook="TrackMap" phx-update="ignore">
+        <div id="map-container" class="w-full h-full"></div>
+
+        <%= if !@tracking and @sessions == [] do %>
+          <div class="absolute inset-0 flex items-center justify-center">
+            <div class="text-center">
+              <div class="text-6xl mb-4">🏁</div>
+              <h2 class="text-2xl font-bold mb-2">F1 Live Tracker</h2>
+              <p class="text-gray-400 mb-6">Real-time car positions & timing data</p>
+              <button phx-click="load_sessions" class="px-6 py-3 bg-red-600 hover:bg-red-500 rounded-lg font-semibold">
+                Get Started
+              </button>
+            </div>
+          </div>
+        <% end %>
+      </div>
+
+      <!-- Timing Tower -->
+      <%= if @tracking do %>
+        <aside class="w-96 bg-gray-900 border-l border-gray-800 overflow-y-auto">
+          <!-- Timing Header -->
+          <div class="sticky top-0 bg-gray-900 border-b border-gray-800 px-4 py-2">
+            <h2 class="text-sm font-semibold text-gray-400 uppercase">Timing</h2>
+          </div>
+
+          <!-- Driver Rows -->
+          <div class="divide-y divide-gray-800">
+            <%= for pos <- @positions do %>
+              <% driver = Map.get(@drivers, pos.driver_number, %{}) %>
+              <% interval = Map.get(@intervals, pos.driver_number, %{}) %>
+              <% lap = latest_lap(@laps, pos.driver_number) %>
+              <% best = best_lap(@laps, pos.driver_number) %>
+
+              <div class="px-4 py-2 flex items-center gap-3 hover:bg-gray-800/50 transition">
+                <!-- Position -->
+                <div class="w-6 text-center font-bold text-sm">
+                  <%= pos.position %>
+                </div>
+
+                <!-- Team colour bar -->
+                <div
+                  class="w-1 h-8 rounded-full"
+                  style={"background-color: ##{driver[:team_colour] || "666"}"}
+                >
+                </div>
+
+                <!-- Driver info -->
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-sm"><%= driver[:code] || "???" %></span>
+                    <span class="text-xs text-gray-500"><%= driver[:number] %></span>
+                  </div>
+                  <div class="text-xs text-gray-400 truncate"><%= driver[:team] %></div>
+                </div>
+
+                <!-- Lap time -->
+                <div class="text-right">
+                  <div class="text-sm font-mono">
+                    <%= if lap, do: format_lap_time(lap.lap_duration), else: "-" %>
+                  </div>
+                  <div class="text-xs text-gray-500 font-mono">
+                    <%= if best, do: "B: #{format_lap_time(best.lap_duration)}", else: "" %>
+                  </div>
+                </div>
+
+                <!-- Gap -->
+                <div class="w-20 text-right">
+                  <div class="text-sm font-mono text-yellow-400">
+                    <%= format_gap(interval[:gap_to_leader]) %>
+                  </div>
+                  <div class="text-xs font-mono text-gray-500">
+                    <%= format_gap(interval[:interval]) %>
+                  </div>
+                </div>
+              </div>
+            <% end %>
+          </div>
+
+          <!-- Race Control Messages -->
+          <%= if @race_control != [] do %>
+            <div class="border-t border-gray-800 p-4">
+              <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Race Control</h3>
+              <div class="space-y-1">
+                <%= for msg <- Enum.take(@race_control, -5) do %>
+                  <div class={"text-xs p-2 rounded #{race_control_class(msg)}"}>
+                    <span class="text-gray-500"><%= msg["date"] && String.slice(msg["date"], 11, 8) %></span>
+                    <%= msg["message"] %>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+          <% end %>
+
+          <!-- Replay Controls -->
+          <div class="border-t border-gray-800 p-4">
+            <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Replay</h3>
+            <div class="flex gap-2">
+              <input
+                type="datetime-local"
+                phx-change="set_replay_from"
+                name="timestamp"
+                class="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm text-white"
+                value={@replay_from}
+              />
+              <button
+                phx-click="start_replay"
+                class="px-3 py-1 text-sm bg-purple-700 hover:bg-purple-600 rounded"
+              >
+                ▶ Replay
+              </button>
+            </div>
+          </div>
+        </aside>
+      <% end %>
+    </main>
+  </div>
+</div>
