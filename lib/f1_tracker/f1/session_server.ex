@@ -211,9 +211,10 @@ defmodule F1Tracker.F1.SessionServer do
       case DataProvider.get_car_data(build_params(sk, new_state.last_drs_ts)) do
         {:ok, data} when is_list(data) and data != [] ->
           drs = process_drs(data)
+          merged_drs = Map.merge(new_state.drs || %{}, drs)
           last_ts = get_latest_timestamp(data)
-          broadcast("drs:update", drs)
-          %{new_state | drs: drs, last_drs_ts: last_ts}
+          broadcast("drs:update", merged_drs)
+          %{new_state | drs: merged_drs, last_drs_ts: last_ts}
 
         _ ->
           new_state
@@ -291,6 +292,7 @@ defmodule F1Tracker.F1.SessionServer do
             end)
             |> Enum.take(-30)
 
+          broadcast("race_control:new", data)
           broadcast("race_control:update", merged)
 
           %{state | race_control: merged, last_race_control_ts: get_latest_timestamp(data)}
@@ -829,7 +831,7 @@ defmodule F1Tracker.F1.SessionServer do
   end
 
   defp process_drs(data) do
-    # Group by driver, keep latest DRS state per driver
+    # Group by driver, keep latest telemetry snapshot per driver.
     # DRS values: 0-1 = off/unknown, 8 = eligible, 10-14 = active/open
     data
     |> Enum.group_by(& &1["driver_number"])
@@ -842,7 +844,11 @@ defmodule F1Tracker.F1.SessionServer do
          drs: drs_value,
          active: drs_value >= 10,
          eligible: drs_value == 8,
-         speed: latest["speed"]
+         speed: latest["speed"],
+         throttle: latest["throttle"],
+         brake: latest["brake"],
+         gear: latest["n_gear"],
+         rpm: latest["rpm"]
        }}
     end)
   end

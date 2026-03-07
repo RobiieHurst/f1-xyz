@@ -142,7 +142,9 @@ defmodule F1Tracker.F1.ReplayServer do
         wall_start: System.monotonic_time(:millisecond),
         tick_ref: nil,
         current_chunk: [],
+        current_car_chunk: [],
         next_chunk: nil,
+        next_car_chunk: nil,
         chunk_start: nil,
         chunk_end: nil
     }
@@ -281,6 +283,7 @@ defmodule F1Tracker.F1.ReplayServer do
     )
 
     records = fetch_location_chunk(sk, from_dt, chunk_end)
+    car_records = fetch_car_data_chunk(sk, from_dt, chunk_end)
 
     # Build track outline from first chunk if we don't have one yet
     chunk_outline =
@@ -302,9 +305,11 @@ defmodule F1Tracker.F1.ReplayServer do
     new_state = %{
       state
       | current_chunk: state.current_chunk ++ records,
+        current_car_chunk: state.current_car_chunk ++ car_records,
         chunk_start: state.chunk_start || from_dt,
         chunk_end: chunk_end,
         next_chunk: nil,
+        next_car_chunk: nil,
         has_track_outline: state.has_track_outline or chunk_outline != [],
         track_outline: if(chunk_outline != [], do: chunk_outline, else: state.track_outline)
     }
@@ -323,8 +328,9 @@ defmodule F1Tracker.F1.ReplayServer do
   end
 
   @impl true
-  def handle_info({:prefetched_chunk, chunk_data, chunk_start, chunk_end}, state) do
-    {:noreply, %{state | next_chunk: {chunk_data, chunk_start, chunk_end}}}
+  def handle_info({:prefetched_chunk, chunk_data, car_chunk_data, chunk_start, chunk_end}, state) do
+    {:noreply,
+     %{state | next_chunk: {chunk_data, chunk_start, chunk_end}, next_car_chunk: car_chunk_data}}
   end
 
   # -- Replay Tick --
@@ -385,6 +391,9 @@ defmodule F1Tracker.F1.ReplayServer do
     # Find intervals at cursor time — latest interval per driver up to cursor
     intervals = intervals_at(state.all_intervals, cursor_str)
 
+    # Find telemetry at cursor time from current car-data chunk
+    telemetry = telemetry_at(state.current_car_chunk, cursor_str)
+
     if locations != %{} do
       broadcast("locations:update", locations)
     end
@@ -399,6 +408,10 @@ defmodule F1Tracker.F1.ReplayServer do
 
     if intervals != %{} do
       broadcast("intervals:update", intervals)
+    end
+
+    if telemetry != %{} do
+      broadcast("drs:update", telemetry)
     end
 
     race_control_new = race_control_new_events(state.race_control, prev_cursor, cursor)
@@ -492,6 +505,28 @@ defmodule F1Tracker.F1.ReplayServer do
     |> Map.new()
   end
 
+  defp telemetry_at(car_chunk, cursor_str) do
+    car_chunk
+    |> Enum.filter(fn r -> r["date"] && r["date"] <= cursor_str end)
+    |> Enum.group_by(& &1["driver_number"])
+    |> Map.new(fn {driver_num, entries} ->
+      latest = Enum.max_by(entries, & &1["date"])
+      drs_value = latest["drs"] || 0
+
+      {driver_num,
+       %{
+         drs: drs_value,
+         active: drs_value >= 10,
+         eligible: drs_value == 8,
+         speed: latest["speed"],
+         throttle: latest["throttle"],
+         brake: latest["brake"],
+         gear: latest["n_gear"],
+         rpm: latest["rpm"]
+       }}
+    end)
+  end
+
   # -- Private: Chunk Management --
 
   defp maybe_advance_chunk(state, cursor) do
@@ -503,9 +538,11 @@ defmodule F1Tracker.F1.ReplayServer do
         %{
           state
           | current_chunk: data,
+            current_car_chunk: state.next_car_chunk || [],
             chunk_start: start,
             chunk_end: end_dt,
-            next_chunk: nil
+            next_chunk: nil,
+            next_car_chunk: nil
         }
         |> maybe_prefetch(cursor)
 
@@ -538,7 +575,8 @@ defmodule F1Tracker.F1.ReplayServer do
 
     Task.start(fn ->
       data = fetch_location_chunk(sk, next_start, next_end)
-      send(parent, {:prefetched_chunk, data, next_start, next_end})
+      car_data = fetch_car_data_chunk(sk, next_start, next_end)
+      send(parent, {:prefetched_chunk, data, car_data, next_start, next_end})
     end)
 
     state
@@ -549,6 +587,18 @@ defmodule F1Tracker.F1.ReplayServer do
     to_str = DateTime.to_iso8601(to_dt)
 
     case DataProvider.get_location_range(session_key, from_str, to_str) do
+      {:ok, data} when is_list(data) -> data
+      _ -> []
+    end
+  end
+
+  defp fetch_car_data_chunk(session_key, from_dt, to_dt) do
+    from_str = DateTime.to_iso8601(from_dt)
+    to_str = DateTime.to_iso8601(to_dt)
+
+    params = [{"session_key", session_key}, {"date>", from_str}, {"date<", to_str}]
+
+    case DataProvider.get_car_data(params) do
       {:ok, data} when is_list(data) -> data
       _ -> []
     end
@@ -858,7 +908,9 @@ defmodule F1Tracker.F1.ReplayServer do
       session_end: nil,
       # Location chunk state
       current_chunk: [],
+      current_car_chunk: [],
       next_chunk: nil,
+      next_car_chunk: nil,
       chunk_start: nil,
       chunk_end: nil,
       tick_ref: nil,

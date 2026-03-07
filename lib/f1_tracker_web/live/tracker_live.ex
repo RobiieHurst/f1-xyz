@@ -45,6 +45,8 @@ defmodule F1TrackerWeb.TrackerLive do
       |> assign(:replay_progress, 0.0)
       |> assign(:replay_cursor, nil)
       |> assign(:replay_loading, false)
+      |> assign(:previous_positions, %{})
+      |> assign(:selected_driver, nil)
 
     {:ok, socket}
   end
@@ -115,13 +117,32 @@ defmodule F1TrackerWeb.TrackerLive do
        tracking: false,
        replay_active: false,
        replay_paused: false,
-       replay_progress: 0.0
-     )}
+       replay_progress: 0.0,
+       selected_driver: nil
+     )
+     |> push_event("follow_driver", %{driver_number: nil})}
   end
 
   @impl true
   def handle_event("toggle_timing", _params, socket) do
     {:noreply, assign(socket, show_timing: !socket.assigns.show_timing)}
+  end
+
+  @impl true
+  def handle_event("select_driver", %{"driver_number" => driver_number}, socket) do
+    number = String.to_integer(driver_number)
+
+    selected_driver =
+      if socket.assigns.selected_driver == number do
+        nil
+      else
+        number
+      end
+
+    {:noreply,
+     socket
+     |> assign(:selected_driver, selected_driver)
+     |> push_event("follow_driver", %{driver_number: selected_driver})}
   end
 
   @impl true
@@ -172,10 +193,12 @@ defmodule F1TrackerWeb.TrackerLive do
      |> assign(:selected_session, sk)
      |> assign(:session_meta, session_meta)
      |> assign(:drivers, drivers)
+     |> assign(:selected_driver, nil)
      |> assign(:tracking, true)
      |> assign(:loading, false)
      |> push_event("drivers_loaded", %{drivers: drivers})
-     |> push_event("session_meta", %{session: session_meta})}
+     |> push_event("session_meta", %{session: session_meta})
+     |> push_event("follow_driver", %{driver_number: nil})}
   end
 
   @impl true
@@ -184,9 +207,11 @@ defmodule F1TrackerWeb.TrackerLive do
      socket
      |> assign(:selected_session, sk)
      |> assign(:drivers, drivers)
+     |> assign(:selected_driver, nil)
      |> assign(:tracking, true)
      |> assign(:loading, false)
-     |> push_event("drivers_loaded", %{drivers: drivers})}
+     |> push_event("drivers_loaded", %{drivers: drivers})
+     |> push_event("follow_driver", %{driver_number: nil})}
   end
 
   @impl true
@@ -217,7 +242,24 @@ defmodule F1TrackerWeb.TrackerLive do
 
   @impl true
   def handle_info({"positions:update", positions}, socket) do
-    {:noreply, assign(socket, :positions, positions)}
+    new_position_map = positions_to_map(positions)
+
+    overtake_events =
+      detect_overtakes(socket.assigns.previous_positions, new_position_map, socket)
+
+    socket =
+      socket
+      |> assign(:positions, positions)
+      |> assign(:previous_positions, new_position_map)
+
+    socket =
+      if overtake_events != [] do
+        push_event(socket, "track_events", %{events: overtake_events})
+      else
+        socket
+      end
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -235,7 +277,18 @@ defmodule F1TrackerWeb.TrackerLive do
       end)
       |> Enum.take(-10)
 
-    {:noreply, assign(socket, :race_control, merged)}
+    incident_events = build_incident_events(messages, socket)
+
+    socket = assign(socket, :race_control, merged)
+
+    socket =
+      if incident_events != [] do
+        push_event(socket, "track_events", %{events: incident_events})
+      else
+        socket
+      end
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -323,6 +376,7 @@ defmodule F1TrackerWeb.TrackerLive do
       |> assign(:personal_best_sectors, state[:personal_best_sectors] || %{})
       |> assign(:drs, state[:drs] || %{})
       |> assign(:team_radio, state[:team_radio] || [])
+      |> assign(:previous_positions, positions_to_map(state[:positions] || []))
 
     if state[:tracking] && map_size(state[:drivers] || %{}) > 0 do
       socket = push_event(socket, "drivers_loaded", %{drivers: state[:drivers]})
@@ -345,6 +399,9 @@ defmodule F1TrackerWeb.TrackerLive do
           true ->
             socket
         end
+
+      socket =
+        push_event(socket, "follow_driver", %{driver_number: socket.assigns.selected_driver})
 
       {:noreply, socket}
     else
@@ -403,6 +460,10 @@ defmodule F1TrackerWeb.TrackerLive do
          drs_active: driver_drs[:active] || false,
          drs_eligible: driver_drs[:eligible] || false,
          speed: driver_drs[:speed],
+         throttle: driver_drs[:throttle],
+         brake: driver_drs[:brake],
+         gear: driver_drs[:gear],
+         rpm: driver_drs[:rpm],
          # Timing data for map labels
          position: Map.get(position_lookup, driver_num),
          last_lap: format_lap_time_short(latest && latest.lap_duration),
@@ -412,6 +473,129 @@ defmodule F1TrackerWeb.TrackerLive do
        })}
     end)
   end
+
+  defp positions_to_map(positions) do
+    Map.new(positions, fn p ->
+      {p[:driver_number] || p["driver_number"], p[:position] || p["position"]}
+    end)
+  end
+
+  defp detect_overtakes(previous_positions, new_positions, socket) do
+    timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    new_positions
+    |> Enum.reduce([], fn {driver, new_pos}, acc ->
+      old_pos = Map.get(previous_positions, driver)
+
+      cond do
+        is_nil(old_pos) or is_nil(new_pos) or new_pos >= old_pos ->
+          acc
+
+        true ->
+          victim =
+            Enum.find_value(new_positions, fn {other_driver, other_new_pos} ->
+              other_old_pos = Map.get(previous_positions, other_driver)
+
+              if other_driver != driver and other_old_pos == new_pos and other_new_pos == old_pos do
+                other_driver
+              else
+                nil
+              end
+            end)
+
+          case Map.get(socket.assigns.locations, driver) do
+            %{x: x, y: y} when is_number(x) and is_number(y) ->
+              driver_code =
+                (Map.get(socket.assigns.drivers, driver) || %{})[:code] || to_string(driver)
+
+              label =
+                if victim do
+                  victim_code =
+                    (Map.get(socket.assigns.drivers, victim) || %{})[:code] || to_string(victim)
+
+                  "OVERTAKE #{driver_code} > #{victim_code}"
+                else
+                  "OVERTAKE #{driver_code}"
+                end
+
+              [
+                %{
+                  id: "overtake-#{driver}-#{old_pos}-#{new_pos}-#{timestamp}",
+                  type: "overtake",
+                  x: x,
+                  y: y,
+                  label: label,
+                  ts: timestamp
+                }
+                | acc
+              ]
+
+            _ ->
+              acc
+          end
+      end
+    end)
+  end
+
+  defp build_incident_events(messages, socket) do
+    timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    messages
+    |> Enum.filter(&incident_message?/1)
+    |> Enum.reduce([], fn msg, acc ->
+      msg_text = msg["message"] || msg[:message] || "Incident"
+      driver_number = msg["driver_number"] || msg[:driver_number] || parse_car_number(msg_text)
+
+      location =
+        if is_integer(driver_number) do
+          Map.get(socket.assigns.locations, driver_number)
+        else
+          nil
+        end
+
+      case location do
+        %{x: x, y: y} when is_number(x) and is_number(y) ->
+          label =
+            msg_text
+            |> String.slice(0, 42)
+            |> then(fn t -> if String.length(msg_text) > 42, do: t <> "...", else: t end)
+
+          [
+            %{
+              id: "incident-#{driver_number || "na"}-#{msg["date"] || msg[:date] || timestamp}",
+              type: "incident",
+              x: x,
+              y: y,
+              label: label,
+              ts: timestamp
+            }
+            | acc
+          ]
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp incident_message?(msg) do
+    text = (msg["message"] || msg[:message] || "") |> String.downcase()
+
+    String.contains?(text, "crash") or
+      String.contains?(text, "accident") or
+      String.contains?(text, "collision") or
+      String.contains?(text, "stopped") or
+      String.contains?(text, "red flag")
+  end
+
+  defp parse_car_number(message) when is_binary(message) do
+    case Regex.run(~r/car\s+(\d{1,2})/i, message) do
+      [_, n] -> String.to_integer(n)
+      _ -> nil
+    end
+  end
+
+  defp parse_car_number(_), do: nil
 
   defp format_lap_time_short(nil), do: nil
 
@@ -514,6 +698,11 @@ defmodule F1TrackerWeb.TrackerLive do
   end
 
   def format_lap_time(duration), do: to_string(duration)
+
+  def format_telemetry_value(nil), do: "-"
+  def format_telemetry_value(value) when is_integer(value), do: Integer.to_string(value)
+  def format_telemetry_value(value) when is_float(value), do: Float.round(value, 1) |> to_string()
+  def format_telemetry_value(value), do: to_string(value)
 
   def format_gap(nil), do: "-"
   def format_gap(gap) when is_number(gap), do: "+#{:io_lib.format("~.3f", [gap])}"

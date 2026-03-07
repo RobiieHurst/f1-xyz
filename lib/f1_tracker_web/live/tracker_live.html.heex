@@ -187,6 +187,53 @@
           </div>
         <% end %>
 
+        <%= if @tracking and @selected_driver do %>
+          <% selected = Map.get(@drivers, @selected_driver, %{}) %>
+          <% selected_drs = Map.get(@drs, @selected_driver, %{}) %>
+          <% selected_lap = latest_lap(@laps, @selected_driver) %>
+          <% selected_interval = Map.get(@intervals, @selected_driver, %{}) %>
+          <div class="absolute top-3 right-3 z-10 w-[250px] rounded-lg border border-blue-500/40 bg-gray-900/90 backdrop-blur px-3 py-2">
+            <div class="flex items-center justify-between mb-1.5">
+              <div class="flex items-center gap-2">
+                <span
+                  class="w-2.5 h-2.5 rounded-full"
+                  style={"background-color: ##{selected[:team_colour] || "3b82f6"}"}
+                >
+                </span>
+                <span class="font-bold text-sm">{selected[:code] || @selected_driver}</span>
+              </div>
+              <button
+                phx-click="select_driver"
+                phx-value-driver_number={@selected_driver}
+                class="text-[10px] text-gray-400 hover:text-gray-200"
+              >
+                Unfollow
+              </button>
+            </div>
+
+            <div class="text-[11px] text-gray-300 grid grid-cols-2 gap-x-3 gap-y-1 font-mono">
+              <span class="text-gray-500">Speed</span><span>{format_telemetry_value(selected_drs[:speed])} km/h</span>
+              <span class="text-gray-500">Throttle</span><span>{format_telemetry_value(selected_drs[:throttle])}%</span>
+              <span class="text-gray-500">Brake</span><span>{format_telemetry_value(selected_drs[:brake])}%</span>
+              <span class="text-gray-500">Gear</span><span>{format_telemetry_value(selected_drs[:gear])}</span>
+              <span class="text-gray-500">RPM</span><span>{format_telemetry_value(selected_drs[:rpm])}</span>
+              <span class="text-gray-500">DRS</span>
+              <span>
+                <%= cond do %>
+                  <% selected_drs[:active] -> %>
+                    OPEN
+                  <% selected_drs[:eligible] -> %>
+                    READY
+                  <% true -> %>
+                    OFF
+                <% end %>
+              </span>
+              <span class="text-gray-500">Lap</span><span>{if selected_lap, do: format_lap_time(selected_lap.lap_duration), else: "-"}</span>
+              <span class="text-gray-500">Gap</span><span>{format_gap(selected_interval[:gap_to_leader])}</span>
+            </div>
+          </div>
+        <% end %>
+
         <%!-- Replay Controls Bar --%>
         <%= if @replay_active do %>
           <div class="absolute bottom-0 left-0 right-0 z-10 bg-gray-900/95 border-t border-gray-700 px-3 sm:px-4 py-2">
@@ -282,7 +329,17 @@
               <% pb =
                 Map.get(@personal_best_sectors, pos.driver_number, %{s1: nil, s2: nil, s3: nil}) %>
 
-              <div class="px-2 sm:px-4 py-1.5 sm:py-2 flex items-center gap-2 sm:gap-3 hover:bg-gray-800/50 transition">
+              <div
+                phx-click="select_driver"
+                phx-value-driver_number={pos.driver_number}
+                class={[
+                  "px-2 sm:px-4 py-1.5 sm:py-2 flex items-center gap-2 sm:gap-3 transition cursor-pointer",
+                  if(@selected_driver == pos.driver_number,
+                    do: "bg-blue-900/30 ring-1 ring-blue-500/40",
+                    else: "hover:bg-gray-800/50"
+                  )
+                ]}
+              >
                 <!-- Position -->
                 <div class="w-5 sm:w-6 text-center font-bold text-xs sm:text-sm">
                   {pos.position}

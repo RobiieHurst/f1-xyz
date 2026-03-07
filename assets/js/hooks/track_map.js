@@ -1,6 +1,7 @@
 const LERP_DURATION_MS = 500;
 const TELEPORT_THRESHOLD = 5000;
 const MAX_LABEL_DISTANCE = 20000;
+const TRACK_EVENT_TTL_MS = 10000;
 
 const DEFAULT_ANCHOR = [2.3522, 48.8566];
 const MIN_FRAME_RANGE = 800;
@@ -78,6 +79,7 @@ const TrackMap = {
     this.carStates = {};
     this.circuitCorners = [];
     this.circuitPath = [];
+    this.trackEvents = [];
 
     this.sessionMeta = null;
     this.localFrame = null;
@@ -86,6 +88,7 @@ const TrackMap = {
     this.carFeatures = new globalThis.Map();
     this.hasFitView = false;
     this.userMovedMap = false;
+    this.followDriver = null;
 
     // Canvas interaction state (zoom + pan)
     this.viewZoom = 1;
@@ -126,6 +129,14 @@ const TrackMap = {
       this.updateCarPositions(locations || {});
     });
 
+    this.handleEvent("follow_driver", ({ driver_number }) => {
+      this.followDriver = Number.isInteger(driver_number) ? String(driver_number) : null;
+    });
+
+    this.handleEvent("track_events", ({ events }) => {
+      this.addTrackEvents(events || []);
+    });
+
     this.handleEvent("replay_data", (data) => {
       if (data.locations) {
         this.localFrame = null;
@@ -139,9 +150,11 @@ const TrackMap = {
     this.carStates = {};
     this.circuitCorners = [];
     this.circuitPath = [];
+    this.trackEvents = [];
     this.localFrame = null;
     this.hasFitView = false;
     this.userMovedMap = false;
+    this.followDriver = null;
     this.viewZoom = 1;
     this.viewPanX = 0;
     this.viewPanY = 0;
@@ -553,6 +566,36 @@ const TrackMap = {
     }
   },
 
+  addTrackEvents(events) {
+    if (!Array.isArray(events) || events.length === 0) return;
+
+    const now = performance.now();
+
+    for (const event of events) {
+      if (!event || !Number.isFinite(event.x) || !Number.isFinite(event.y)) continue;
+
+      this.trackEvents.push({
+        id: event.id || `evt-${now}-${Math.random()}`,
+        type: event.type || "event",
+        x: event.x,
+        y: event.y,
+        label: event.label || "Event",
+        createdAt: now,
+      });
+    }
+
+    const seen = new Set();
+    this.trackEvents = this.trackEvents.filter((event) => {
+      if (seen.has(event.id)) return false;
+      seen.add(event.id);
+      return true;
+    });
+  },
+
+  pruneTrackEvents(now) {
+    this.trackEvents = this.trackEvents.filter((event) => now - event.createdAt <= TRACK_EVENT_TTL_MS);
+  },
+
   updateOpenLayersFrame() {
     if (!this.olMap) return;
 
@@ -560,6 +603,7 @@ const TrackMap = {
     if (entries.length === 0) return;
 
     const now = performance.now();
+    this.pruneTrackEvents(now);
     for (const [, car] of entries) {
       const elapsed = now - car.startTime;
       const t = Math.min(elapsed / LERP_DURATION_MS, 1);
@@ -714,6 +758,23 @@ const TrackMap = {
     const offsetX = (w - rangeX * scale) / 2;
     const offsetY = (h - rangeY * scale) / 2;
 
+    if (this.followDriver) {
+      const followed = this.carStates[this.followDriver];
+
+      if (followed?.current) {
+        const px0 = (followed.current.x - minX) * scale + offsetX;
+        const py0 = (followed.current.y - minY) * scale + offsetY;
+        const cx = w / 2;
+        const cy = h / 2;
+
+        const targetPanX = -((px0 - cx) * this.viewZoom);
+        const targetPanY = -((py0 - cy) * this.viewZoom);
+
+        this.viewPanX += (targetPanX - this.viewPanX) * 0.22;
+        this.viewPanY += (targetPanY - this.viewPanY) * 0.22;
+      }
+    }
+
     const centerX = w / 2;
     const centerY = h / 2;
 
@@ -836,6 +897,55 @@ const TrackMap = {
       ctx.font = `bold ${Math.max(8, 10 * this.viewZoom)}px monospace`;
       ctx.textAlign = "center";
       ctx.fillText(label, px, py - Math.max(8, 10 * this.viewZoom));
+
+    }
+
+    if (this.followDriver) {
+      const followed = this.carStates[this.followDriver];
+      if (followed?.current) {
+        const fx0 = (followed.current.x - minX) * scale + offsetX;
+        const fy0 = (followed.current.y - minY) * scale + offsetY;
+        const fp = transformScreen(fx0, fy0);
+
+        ctx.beginPath();
+        ctx.arc(fp.x, fp.y, Math.max(10, 16 * this.viewZoom), 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(59,130,246,0.8)";
+        ctx.lineWidth = Math.max(2, 3 * this.viewZoom);
+        ctx.stroke();
+      }
+    }
+
+    if (this.trackEvents.length > 0) {
+      for (const event of this.trackEvents) {
+        const px0 = (event.x - minX) * scale + offsetX;
+        const py0 = (event.y - minY) * scale + offsetY;
+        const transformed = transformScreen(px0, py0);
+        const age = now - event.createdAt;
+        const fade = Math.max(0, 1 - age / TRACK_EVENT_TTL_MS);
+
+        const eventColor = event.type === "incident" ? "239, 68, 68" : "34, 197, 94";
+
+        ctx.beginPath();
+        ctx.arc(transformed.x, transformed.y, Math.max(8, 12 * this.viewZoom), 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(${eventColor}, ${0.75 * fade})`;
+        ctx.lineWidth = Math.max(2, 3 * this.viewZoom);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(transformed.x, transformed.y, Math.max(2.5, 3.5 * this.viewZoom), 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${eventColor}, ${0.95 * fade})`;
+        ctx.fill();
+
+        ctx.font = `bold ${Math.max(8, 10 * this.viewZoom)}px monospace`;
+        ctx.textAlign = "left";
+        ctx.fillStyle = `rgba(241, 245, 249, ${0.95 * fade})`;
+        ctx.strokeStyle = `rgba(2, 6, 23, ${0.9 * fade})`;
+        ctx.lineWidth = Math.max(1, 2 * this.viewZoom);
+        const labelX = transformed.x + Math.max(10, 14 * this.viewZoom);
+        const labelY = transformed.y - Math.max(8, 10 * this.viewZoom);
+        ctx.strokeText(event.label, labelX, labelY);
+        ctx.fillText(event.label, labelX, labelY);
+      }
     }
 
     const session = this.sessionMeta || {};
