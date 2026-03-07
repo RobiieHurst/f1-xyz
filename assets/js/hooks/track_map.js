@@ -1,15 +1,3 @@
-import OLMap from "ol/Map";
-import View from "ol/View";
-import TileLayer from "ol/layer/Tile";
-import VectorLayer from "ol/layer/Vector";
-import VectorSource from "ol/source/Vector";
-import OSM from "ol/source/OSM";
-import Feature from "ol/Feature";
-import Point from "ol/geom/Point";
-import LineString from "ol/geom/LineString";
-import { fromLonLat } from "ol/proj";
-import { Circle as CircleStyle, Fill, Stroke, Style, Text } from "ol/style";
-
 const LERP_DURATION_MS = 500;
 const TELEPORT_THRESHOLD = 5000;
 const MAX_TRAIL_POINTS = 1000;

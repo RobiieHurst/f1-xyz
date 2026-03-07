@@ -19,7 +19,6 @@
 
 // Track map hook
 import TrackMap from "./hooks/track_map"
-import "ol/ol.css"
 
 // Include phoenix_html to handle method=PUT/DELETE in forms and buttons.
 import "phoenix_html"
