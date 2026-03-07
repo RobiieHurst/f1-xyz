@@ -39,9 +39,12 @@ const TrackMap = {
     // Handle LiveView events
     this.handleEvent("drivers_loaded", (data) => {
       this.drivers = data.drivers;
-      // Reset on new session
+      // Reset all state on new session
+      this.carStates = {};
+      this.markers = {};
       this.trackOutline = [];
       this.trackTrail = [];
+      this.trailDriver = null;
       this.cachedBounds = null;
     });
 
@@ -127,34 +130,38 @@ const TrackMap = {
 
   /**
    * Accumulate car positions into the track trail.
-   * Uses the lead car (or any car) to build a circuit outline.
+   * Tracks a single driver's path over time to trace a clean circuit outline.
+   * Falls back to choosing the first available driver.
    */
   addToTrail(locations) {
+    // Pick a trail driver — stick with it once chosen
+    if (!this.trailDriver) {
+      const keys = Object.keys(locations);
+      if (keys.length === 0) return;
+      this.trailDriver = keys[0];
+    }
+
+    const loc = locations[this.trailDriver];
+    if (!loc || loc.x == null || loc.y == null) return;
+
     let trailChanged = false;
 
-    for (const [, loc] of Object.entries(locations)) {
-      if (loc.x == null || loc.y == null) continue;
+    if (this.trackTrail.length > 0) {
+      const last = this.trackTrail[this.trackTrail.length - 1];
+      const dx = loc.x - last.x;
+      const dy = loc.y - last.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
 
-      // Check minimum distance from last trail point
-      if (this.trackTrail.length > 0) {
-        const last = this.trackTrail[this.trackTrail.length - 1];
-        const dx = loc.x - last.x;
-        const dy = loc.y - last.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < MIN_TRAIL_DISTANCE) continue;
-
-        // Skip teleports
-        if (dist > TELEPORT_THRESHOLD) continue;
-      }
-
-      this.trackTrail.push({ x: loc.x, y: loc.y });
-      trailChanged = true;
+      // Skip if too close (clustering) or too far (pit teleport)
+      if (dist < MIN_TRAIL_DISTANCE || dist > TELEPORT_THRESHOLD) return;
     }
+
+    this.trackTrail.push({ x: loc.x, y: loc.y });
+    trailChanged = true;
 
     // Trim trail if too long
     if (this.trackTrail.length > MAX_TRAIL_POINTS) {
       this.trackTrail = this.trackTrail.slice(-MAX_TRAIL_POINTS);
-      trailChanged = true;
     }
 
     // Invalidate bounds cache when trail changes

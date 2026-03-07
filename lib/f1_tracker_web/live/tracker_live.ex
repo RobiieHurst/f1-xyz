@@ -40,7 +40,7 @@ defmodule F1TrackerWeb.TrackerLive do
       |> assign(:show_timing, false)
       |> assign(:replay_active, false)
       |> assign(:replay_paused, false)
-      |> assign(:replay_speed, 20)
+      |> assign(:replay_speed, 1)
       |> assign(:replay_progress, 0.0)
       |> assign(:replay_cursor, nil)
       |> assign(:replay_loading, false)

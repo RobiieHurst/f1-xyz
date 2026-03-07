@@ -188,12 +188,16 @@ defmodule F1Tracker.F1.ReplayServer do
     session_start = parse_dt!(state.session_meta.date_start)
     session_end = parse_dt!(state.session_meta.date_end)
 
-    # Bulk-load small datasets
+    # Bulk-load small datasets with brief pauses to avoid API rate limits
     positions = fetch_all_positions(params)
+    Process.sleep(200)
     laps = fetch_all_laps(params)
+    Process.sleep(200)
     intervals = fetch_all_intervals(params)
+    Process.sleep(200)
     stints = fetch_all_stints(params)
     weather = fetch_latest_weather(params)
+    Process.sleep(200)
     race_control = fetch_race_control(params)
     team_radio = fetch_team_radio(params)
 
@@ -222,7 +226,9 @@ defmodule F1Tracker.F1.ReplayServer do
     }
 
     # Fetch track outline from a single driver's lap trajectory
+    Process.sleep(500)
     track_outline = fetch_track_outline(sk, session_start, state.drivers)
+    Logger.info("ReplayServer track outline: #{length(track_outline)} points")
 
     # Broadcast static data
     broadcast("stints:update", stints)
@@ -231,9 +237,13 @@ defmodule F1Tracker.F1.ReplayServer do
     broadcast("team_radio:update", team_radio)
     broadcast("sectors:update", %{best: best_sectors, personal: personal_best_sectors})
 
-    if track_outline != [] do
-      broadcast("track_outline:update", track_outline)
-    end
+    new_state =
+      if track_outline != [] do
+        broadcast("track_outline:update", track_outline)
+        %{new_state | has_track_outline: true}
+      else
+        new_state
+      end
 
     # Broadcast initial replay state
     broadcast_replay_state(new_state)
@@ -254,12 +264,23 @@ defmodule F1Tracker.F1.ReplayServer do
 
     records = fetch_location_chunk(sk, from_dt, chunk_end)
 
+    # Build track outline from first chunk if we don't have one yet
+    if not state.has_track_outline and records != [] do
+      outline = build_outline_from_chunk(records)
+
+      if outline != [] do
+        Logger.info("ReplayServer built track outline from chunk: #{length(outline)} points")
+        broadcast("track_outline:update", outline)
+      end
+    end
+
     new_state = %{
       state
       | current_chunk: state.current_chunk ++ records,
         chunk_start: state.chunk_start || from_dt,
         chunk_end: chunk_end,
-        next_chunk: nil
+        next_chunk: nil,
+        has_track_outline: state.has_track_outline or records != []
     }
 
     # Start ticking if not paused
@@ -516,6 +537,18 @@ defmodule F1Tracker.F1.ReplayServer do
     end
   end
 
+  defp build_outline_from_chunk(records) do
+    # Extract one driver's path from the chunk to trace the circuit.
+    # Pick the driver with the most data points (most likely on track).
+    records
+    |> Enum.group_by(& &1["driver_number"])
+    |> Enum.max_by(fn {_driver, entries} -> length(entries) end, fn -> {nil, []} end)
+    |> case do
+      {nil, _} -> []
+      {_driver, entries} -> build_clean_outline(entries)
+    end
+  end
+
   defp build_clean_outline(data) do
     data
     |> Enum.sort_by(& &1["date"])
@@ -686,7 +719,7 @@ defmodule F1Tracker.F1.ReplayServer do
       active: false,
       paused: false,
       loading: false,
-      speed: 20,
+      speed: 1,
       replay_cursor: nil,
       wall_start: nil,
       session_start: nil,
@@ -697,6 +730,7 @@ defmodule F1Tracker.F1.ReplayServer do
       chunk_start: nil,
       chunk_end: nil,
       tick_ref: nil,
+      has_track_outline: false,
       # Bulk data
       all_positions: [],
       all_laps: %{},

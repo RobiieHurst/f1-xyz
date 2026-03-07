@@ -123,7 +123,13 @@ defmodule F1Tracker.OpenF1.Client do
     url = @base_url <> path
     headers = auth_headers()
 
-    case Req.get(url, params: params, headers: headers) do
+    case Req.get(url,
+           params: params,
+           headers: headers,
+           retry: :transient,
+           retry_delay: &retry_delay/1,
+           max_retries: 5
+         ) do
       {:ok, %Req.Response{status: 200, body: body}} ->
         {:ok, body}
 
@@ -133,6 +139,12 @@ defmodule F1Tracker.OpenF1.Client do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+  defp retry_delay(attempt) do
+    delay = Integer.pow(2, attempt - 1) * 1_000
+    min(delay, 16_000)
   end
 
   defp auth_headers do

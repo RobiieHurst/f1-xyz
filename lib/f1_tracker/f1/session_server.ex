@@ -8,8 +8,8 @@ defmodule F1Tracker.F1.SessionServer do
 
   alias F1Tracker.OpenF1.Client
 
-  @poll_interval_ms 1_000
-  @location_poll_ms 500
+  @poll_interval_ms 5_000
+  @location_poll_ms 2_000
   @pubsub F1Tracker.PubSub
 
   # -- Public API --
@@ -640,7 +640,7 @@ defmodule F1Tracker.F1.SessionServer do
   end
 
   defp schedule_poll(:race_control) do
-    Process.send_after(self(), {:poll, :race_control}, 5_000)
+    Process.send_after(self(), {:poll, :race_control}, 15_000)
   end
 
   defp broadcast(event, data) do
