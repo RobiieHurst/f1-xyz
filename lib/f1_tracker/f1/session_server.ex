@@ -368,31 +368,23 @@ defmodule F1Tracker.F1.SessionServer do
   @impl true
   def handle_info(:fetch_track_outline, %{session_key: sk, drivers: drivers} = state)
       when is_integer(sk) and map_size(drivers) > 0 do
-    # For live sessions, fetch a wider recent window and derive an outline
-    # from the best driver trajectory in that window.
+    # For live sessions, try a few drivers individually in a bounded window.
+    # This avoids loading huge all-driver location datasets into memory.
     now = DateTime.utc_now()
-    from = DateTime.add(now, -900, :second)
+    from = DateTime.add(now, -420, :second)
     from_str = DateTime.to_iso8601(from)
     to_str = DateTime.to_iso8601(now)
 
-    case Client.get_location_range(sk, from_str, to_str) do
-      {:ok, data} when is_list(data) and length(data) > 100 ->
-        outline = build_track_outline_from_locations(data)
+    outline = build_outline_from_driver_candidates(sk, drivers, from_str, to_str)
 
-        if outline != [] do
-          Logger.info("SessionServer fetched track outline: #{length(outline)} points")
-          broadcast("track_outline:update", outline)
-          {:noreply, %{state | track_outline: outline}}
-        else
-          # Outline shape not reliable yet — retry later
-          Process.send_after(self(), :fetch_track_outline, 30_000)
-          {:noreply, state}
-        end
-
-      _ ->
-        # Not enough data yet — retry in 30 seconds
-        Process.send_after(self(), :fetch_track_outline, 30_000)
-        {:noreply, state}
+    if outline != [] do
+      Logger.info("SessionServer fetched track outline: #{length(outline)} points")
+      broadcast("track_outline:update", outline)
+      {:noreply, %{state | track_outline: outline}}
+    else
+      # Not enough usable data yet — retry in 30 seconds
+      Process.send_after(self(), :fetch_track_outline, 30_000)
+      {:noreply, state}
     end
   end
 
@@ -430,17 +422,24 @@ defmodule F1Tracker.F1.SessionServer do
     if valid_outline?(outline), do: outline, else: []
   end
 
-  defp build_track_outline_from_locations(data) do
-    data
-    |> Enum.group_by(& &1["driver_number"])
-    |> Enum.sort_by(fn {_driver, entries} -> length(entries) end, :desc)
-    |> Enum.reduce_while([], fn {_driver, entries}, _acc ->
-      outline = build_track_outline(entries)
+  defp build_outline_from_driver_candidates(session_key, drivers, from_str, to_str) do
+    drivers
+    |> Map.keys()
+    |> Enum.sort()
+    |> Enum.take(6)
+    |> Enum.reduce_while([], fn driver_num, _acc ->
+      case Client.get_location_for_driver(session_key, driver_num, from_str, to_str) do
+        {:ok, data} when is_list(data) and length(data) > 100 ->
+          outline = build_track_outline(data)
 
-      if outline != [] do
-        {:halt, outline}
-      else
-        {:cont, []}
+          if outline != [] do
+            {:halt, outline}
+          else
+            {:cont, []}
+          end
+
+        _ ->
+          {:cont, []}
       end
     end)
   end

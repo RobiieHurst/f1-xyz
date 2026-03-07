@@ -542,41 +542,47 @@ defmodule F1Tracker.F1.ReplayServer do
 
   @doc false
   defp fetch_track_outline(session_key, session_start, drivers) do
-    # Fetch a wide window after race start and derive the best valid
-    # closed-loop outline from whichever driver has usable trajectory.
+    # Try a few drivers individually in a bounded window.
+    # This avoids loading huge all-driver datasets into memory.
     if map_size(drivers) == 0 do
       []
     else
       outline_start = DateTime.add(session_start, 120, :second)
-      outline_end = DateTime.add(outline_start, 900, :second)
+      outline_end = DateTime.add(outline_start, 420, :second)
 
       from_str = DateTime.to_iso8601(outline_start)
       to_str = DateTime.to_iso8601(outline_end)
 
-      case Client.get_location_range(session_key, from_str, to_str) do
-        {:ok, data} when is_list(data) and length(data) > 100 ->
-          outline = build_outline_from_bulk_locations(data)
-          Logger.info("ReplayServer fetched track outline: #{length(outline)} points")
-          outline
+      outline = build_outline_from_driver_candidates(session_key, drivers, from_str, to_str)
 
-        _ ->
-          Logger.warning("ReplayServer: track outline fetch returned no data")
-          []
+      if outline == [] do
+        Logger.warning("ReplayServer: track outline fetch returned no data")
+      else
+        Logger.info("ReplayServer fetched track outline: #{length(outline)} points")
       end
+
+      outline
     end
   end
 
-  defp build_outline_from_bulk_locations(data) do
-    data
-    |> Enum.group_by(& &1["driver_number"])
-    |> Enum.sort_by(fn {_driver, entries} -> length(entries) end, :desc)
-    |> Enum.reduce_while([], fn {_driver, entries}, _acc ->
-      outline = build_clean_outline(entries)
+  defp build_outline_from_driver_candidates(session_key, drivers, from_str, to_str) do
+    drivers
+    |> Map.keys()
+    |> Enum.sort()
+    |> Enum.take(6)
+    |> Enum.reduce_while([], fn driver_num, _acc ->
+      case Client.get_location_for_driver(session_key, driver_num, from_str, to_str) do
+        {:ok, data} when is_list(data) and length(data) > 100 ->
+          outline = build_clean_outline(data)
 
-      if valid_outline?(outline) do
-        {:halt, outline}
-      else
-        {:cont, []}
+          if valid_outline?(outline) do
+            {:halt, outline}
+          else
+            {:cont, []}
+          end
+
+        _ ->
+          {:cont, []}
       end
     end)
   end
