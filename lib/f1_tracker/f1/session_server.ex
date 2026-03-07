@@ -567,7 +567,8 @@ defmodule F1Tracker.F1.SessionServer do
   defp fetch_session_meta(session_key) do
     case DataProvider.get_sessions(%{session_key: session_key}) do
       {:ok, [session | _]} ->
-        circuit_image = fetch_circuit_image(session)
+        meeting_meta = fetch_meeting_metadata(session)
+        circuit_info = fetch_circuit_info(meeting_meta.circuit_info_url)
 
         %{
           date_start: session["date_start"],
@@ -580,7 +581,14 @@ defmodule F1Tracker.F1.SessionServer do
           circuit_short_name: session["circuit_short_name"],
           country_name: session["country_name"],
           location: session["location"],
-          circuit_image: circuit_image
+          circuit_image: meeting_meta.circuit_image,
+          country_flag: meeting_meta.country_flag,
+          circuit_info_url: meeting_meta.circuit_info_url,
+          circuit_rotation: circuit_info.rotation,
+          circuit_path: circuit_info.path,
+          circuit_corners: circuit_info.corners,
+          circuit_marshal_lights: circuit_info.marshal_lights,
+          circuit_marshal_sectors: circuit_info.marshal_sectors
         }
 
       _ ->
@@ -595,14 +603,14 @@ defmodule F1Tracker.F1.SessionServer do
     end
   end
 
-  defp fetch_circuit_image(session) do
+  defp fetch_meeting_metadata(session) do
     meeting_key = session["meeting_key"]
 
-    image_from_meeting_key =
+    meeting =
       case meeting_key do
         key when is_integer(key) ->
           case DataProvider.get_meetings(%{meeting_key: key}) do
-            {:ok, [meeting | _]} -> meeting["circuit_image"]
+            {:ok, [meeting | _]} -> meeting
             _ -> nil
           end
 
@@ -610,18 +618,100 @@ defmodule F1Tracker.F1.SessionServer do
           nil
       end
 
-    if is_binary(image_from_meeting_key) and image_from_meeting_key != "" do
-      image_from_meeting_key
-    else
-      case DataProvider.get_meetings(%{
-             year: session["year"],
-             circuit_key: session["circuit_key"]
-           }) do
-        {:ok, [meeting | _]} -> meeting["circuit_image"]
-        _ -> nil
+    meeting =
+      if is_map(meeting) do
+        meeting
+      else
+        case DataProvider.get_meetings(%{
+               year: session["year"],
+               circuit_key: session["circuit_key"]
+             }) do
+          {:ok, [fallback | _]} -> fallback
+          _ -> %{}
+        end
       end
+
+    %{
+      circuit_image: meeting["circuit_image"],
+      country_flag: meeting["country_flag"],
+      circuit_info_url: meeting["circuit_info_url"]
+    }
+  end
+
+  defp fetch_circuit_info(url) when is_binary(url) and url != "" do
+    case Req.get(url,
+           headers: [{"user-agent", "Mozilla/5.0"}],
+           retry: :transient,
+           retry_delay: fn attempt -> min(Integer.pow(2, attempt - 1) * 500, 4_000) end,
+           max_retries: 3
+         ) do
+      {:ok, %Req.Response{status: 200, body: body}} when is_map(body) ->
+        %{
+          rotation: body["rotation"],
+          path: normalize_circuit_path(body),
+          corners: normalize_circuit_markers(body["corners"]),
+          marshal_lights: normalize_circuit_markers(body["marshalLights"]),
+          marshal_sectors: normalize_circuit_markers(body["marshalSectors"])
+        }
+
+      _ ->
+        %{
+          rotation: nil,
+          corners: [],
+          marshal_lights: [],
+          marshal_sectors: []
+        }
     end
   end
+
+  defp fetch_circuit_info(_url) do
+    %{
+      rotation: nil,
+      path: [],
+      corners: [],
+      marshal_lights: [],
+      marshal_sectors: []
+    }
+  end
+
+  defp normalize_circuit_markers(markers) when is_list(markers) do
+    markers
+    |> Enum.map(fn marker ->
+      pos = marker["trackPosition"] || %{}
+
+      %{
+        x: pos["x"],
+        y: pos["y"],
+        number: marker["number"],
+        letter: marker["letter"],
+        angle: marker["angle"],
+        distance: marker["length"]
+      }
+    end)
+    |> Enum.filter(fn m -> is_number(m.x) and is_number(m.y) end)
+    |> Enum.sort_by(&(&1.distance || 0.0))
+  end
+
+  defp normalize_circuit_markers(_), do: []
+
+  defp normalize_circuit_path(body) when is_map(body) do
+    xs = body["x"]
+    ys = body["y"]
+
+    if is_list(xs) and is_list(ys) and xs != [] and ys != [] do
+      count = min(length(xs), length(ys))
+
+      xs
+      |> Enum.take(count)
+      |> Enum.zip(Enum.take(ys, count))
+      |> Enum.map(fn {x, y} -> %{x: x, y: y} end)
+      |> Enum.filter(fn p -> is_number(p.x) and is_number(p.y) end)
+    else
+      []
+    end
+  end
+
+  defp normalize_circuit_path(_), do: []
 
   defp fetch_drivers(session_key) do
     case DataProvider.get_drivers(%{session_key: session_key}) do

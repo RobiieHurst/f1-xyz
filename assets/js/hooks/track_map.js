@@ -1,9 +1,6 @@
 const LERP_DURATION_MS = 500;
 const TELEPORT_THRESHOLD = 5000;
-const MAX_TRAIL_POINTS = 1000;
-const MIN_TRAIL_DISTANCE = 35;
-const MAX_TRACK_CLOUD_POINTS = 6000;
-const TRACK_CLOUD_CELL = 70;
+const MAX_LABEL_DISTANCE = 20000;
 
 const DEFAULT_ANCHOR = [2.3522, 48.8566];
 const MIN_FRAME_RANGE = 800;
@@ -79,13 +76,8 @@ const TrackMap = {
     this.animFrameId = null;
 
     this.carStates = {};
-    this.trackOutline = [];
-    this.trackTrail = [];
-    this.trackCloud = [];
-    this.trackCloudCells = new Set();
-    this.trailDriver = null;
-    this.circuitImage = null;
-    this.circuitImageLoaded = false;
+    this.circuitCorners = [];
+    this.circuitPath = [];
 
     this.sessionMeta = null;
     this.localFrame = null;
@@ -115,7 +107,8 @@ const TrackMap = {
       this.localFrame = null;
       this.hasFitView = false;
       this.userMovedMap = false;
-      this.loadCircuitImage(session?.circuit_image);
+      this.circuitCorners = Array.isArray(session?.circuit_corners) ? session.circuit_corners : [];
+      this.circuitPath = Array.isArray(session?.circuit_path) ? session.circuit_path : [];
       this.updateHud();
 
       if (this.olMap) {
@@ -125,12 +118,8 @@ const TrackMap = {
       }
     });
 
-    this.handleEvent("track_outline", ({ points }) => {
-      if (points && points.length > 0) {
-        this.trackOutline = points;
-        this.localFrame = null;
-        this.hasFitView = false;
-      }
+    this.handleEvent("track_outline", () => {
+      // Track rendering now relies exclusively on meetings.circuit_info_url data.
     });
 
     this.handleEvent("locations_update", ({ locations }) => {
@@ -139,8 +128,6 @@ const TrackMap = {
 
     this.handleEvent("replay_data", (data) => {
       if (data.locations) {
-        this.trackTrail = [];
-        this.trailDriver = null;
         this.localFrame = null;
         this.hasFitView = false;
         this.updateCarPositions(data.locations, true);
@@ -150,11 +137,8 @@ const TrackMap = {
 
   resetSessionGraphics() {
     this.carStates = {};
-    this.trackOutline = [];
-    this.trackTrail = [];
-    this.trackCloud = [];
-    this.trackCloudCells = new Set();
-    this.trailDriver = null;
+    this.circuitCorners = [];
+    this.circuitPath = [];
     this.localFrame = null;
     this.hasFitView = false;
     this.userMovedMap = false;
@@ -162,8 +146,6 @@ const TrackMap = {
     this.viewPanX = 0;
     this.viewPanY = 0;
     this.isDragging = false;
-    this.circuitImage = null;
-    this.circuitImageLoaded = false;
 
     if (this.trackSource) {
       this.trackSource.clear();
@@ -325,31 +307,6 @@ const TrackMap = {
     }
   },
 
-  loadCircuitImage(imageUrl) {
-    if (!imageUrl || typeof imageUrl !== "string") {
-      this.circuitImage = null;
-      this.circuitImageLoaded = false;
-      return;
-    }
-
-    const img = new Image();
-    img.decoding = "async";
-    img.loading = "eager";
-    img.crossOrigin = "anonymous";
-
-    img.onload = () => {
-      this.circuitImage = img;
-      this.circuitImageLoaded = true;
-    };
-
-    img.onerror = () => {
-      this.circuitImage = null;
-      this.circuitImageLoaded = false;
-    };
-
-    img.src = imageUrl;
-  },
-
   getCircuitKey() {
     const key = this.sessionMeta?.circuit_key;
     return Number.isInteger(key) ? key : null;
@@ -371,11 +328,58 @@ const TrackMap = {
   },
 
   getTrackPath() {
-    return this.trackOutline.length > 0 ? this.trackOutline : this.trackTrail;
+    if (this.circuitPath.length >= 20) {
+      const points = this.circuitPath
+        .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+        .map((p) => ({ x: p.x, y: p.y }));
+
+      if (points.length >= 20) {
+        return [...points, points[0]];
+      }
+    }
+
+    return this.getCircuitPath();
+  },
+
+  getCircuitPath() {
+    if (!Array.isArray(this.circuitCorners) || this.circuitCorners.length < 3) return [];
+
+    const points = this.circuitCorners
+      .filter((c) => Number.isFinite(c.x) && Number.isFinite(c.y))
+      .map((c) => ({ x: c.x, y: c.y }));
+
+    if (points.length < 3) return [];
+
+    // Close the loop for drawing.
+    return [...points, points[0]];
+  },
+
+  getCircuitCorners() {
+    if (!Array.isArray(this.circuitCorners)) return [];
+
+    return this.circuitCorners
+      .filter((c) => Number.isFinite(c.x) && Number.isFinite(c.y) && Number.isFinite(c.number))
+      .map((c) => ({
+        x: c.x,
+        y: c.y,
+        number: c.number,
+        letter: c.letter,
+        angle: Number.isFinite(c.angle) ? c.angle : null,
+      }));
   },
 
   pathLooksCircuit(path) {
-    if (!path || path.length < 120) return false;
+    if (!path || path.length < 4) return false;
+
+    if (path.length < 60) {
+      const xs = path.map((pt) => pt.x);
+      const ys = path.map((pt) => pt.y);
+      const rangeX = Math.max(...xs) - Math.min(...xs);
+      const rangeY = Math.max(...ys) - Math.min(...ys);
+      return Math.max(rangeX, rangeY) > 2_000;
+    }
+
+    if (path.length < 120) return false;
 
     const first = path[0];
     const last = path[path.length - 1];
@@ -500,65 +504,10 @@ const TrackMap = {
     return [anchorLon + dLon, anchorLat + dLat];
   },
 
-  addToTrail(locations) {
-    if (!this.trailDriver) {
-      const keys = Object.keys(locations);
-      if (keys.length === 0) return;
-      this.trailDriver = keys[0];
-    }
-
-    const loc = locations[this.trailDriver];
-    if (!loc || loc.x == null || loc.y == null) {
-      this.addToTrackCloud(locations);
-      return;
-    }
-
-    if (this.trackTrail.length > 0) {
-      const last = this.trackTrail[this.trackTrail.length - 1];
-      const dx = loc.x - last.x;
-      const dy = loc.y - last.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < MIN_TRAIL_DISTANCE) {
-        this.addToTrackCloud(locations);
-        return;
-      }
-
-      // For big jumps, start a new segment by accepting the point anyway.
-    }
-
-    this.trackTrail.push({ x: loc.x, y: loc.y });
-    if (this.trackTrail.length > MAX_TRAIL_POINTS) {
-      this.trackTrail = this.trackTrail.slice(-MAX_TRAIL_POINTS);
-    }
-
-    this.addToTrackCloud(locations);
-  },
-
-  addToTrackCloud(locations) {
-    for (const loc of Object.values(locations)) {
-      if (!loc || loc.x == null || loc.y == null) continue;
-
-      const gx = Math.round(loc.x / TRACK_CLOUD_CELL);
-      const gy = Math.round(loc.y / TRACK_CLOUD_CELL);
-      const key = `${gx}:${gy}`;
-
-      if (this.trackCloudCells.has(key)) continue;
-
-      this.trackCloudCells.add(key);
-      this.trackCloud.push({ x: loc.x, y: loc.y, key });
-
-      if (this.trackCloud.length > MAX_TRACK_CLOUD_POINTS) {
-        const removed = this.trackCloud.shift();
-        if (removed) this.trackCloudCells.delete(removed.key);
-      }
-    }
-  },
-
   updateCarPositions(locations, snap = false) {
     if (!this.mapReady) return;
 
     const now = performance.now();
-    this.addToTrail(locations);
 
     for (const [driverNum, loc] of Object.entries(locations)) {
       if (loc.x == null || loc.y == null) continue;
@@ -580,6 +529,10 @@ const TrackMap = {
         const dx = loc.x - existing.target.x;
         const dy = loc.y - existing.target.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
+
+        if (dist > MAX_LABEL_DISTANCE && !snap) {
+          continue;
+        }
 
         if (dist > TELEPORT_THRESHOLD) {
           // Snap large jumps (pit lane / data discontinuity) instead of dropping cars.
@@ -749,16 +702,8 @@ const TrackMap = {
     }
 
     const trackPath = this.getTrackPath();
-    const xs = [
-      ...entries.map(([, c]) => c.current.x),
-      ...trackPath.map((p) => p.x),
-      ...this.trackCloud.map((p) => p.x),
-    ];
-    const ys = [
-      ...entries.map(([, c]) => c.current.y),
-      ...trackPath.map((p) => p.y),
-      ...this.trackCloud.map((p) => p.y),
-    ];
+    const xs = [...entries.map(([, c]) => c.current.x), ...trackPath.map((p) => p.x)];
+    const ys = [...entries.map(([, c]) => c.current.y), ...trackPath.map((p) => p.y)];
     const minX = Math.min(...xs);
     const maxX = Math.max(...xs);
     const minY = Math.min(...ys);
@@ -833,39 +778,45 @@ const TrackMap = {
       ctx.font = `bold ${Math.max(8, 10 * this.viewZoom)}px monospace`;
       ctx.textAlign = "left";
       ctx.fillText("S/F", firstT.x + 8, firstT.y - 8);
-    } else if (this.trackCloud.length > 0) {
-      // Fallback: draw track density cloud while full outline is unavailable.
-      ctx.fillStyle = "rgba(125, 140, 165, 0.35)";
-      for (const pt of this.trackCloud) {
-        const px0 = (pt.x - minX) * scale + offsetX;
-        const py0 = (pt.y - minY) * scale + offsetY;
-        const t = transformScreen(px0, py0);
-        ctx.beginPath();
-        ctx.arc(t.x, t.y, Math.max(1.5, 2 * this.viewZoom), 0, Math.PI * 2);
-        ctx.fill();
+
+      // Corner markers from circuit_info_url metadata
+      const corners = this.getCircuitCorners();
+      if (corners.length > 0) {
+        for (const corner of corners) {
+          const cx0 = (corner.x - minX) * scale + offsetX;
+          const cy0 = (corner.y - minY) * scale + offsetY;
+          const cpt = transformScreen(cx0, cy0);
+
+          const angleDeg = corner.angle ?? -90;
+          const angleRad = (angleDeg * Math.PI) / 180;
+          const labelDist = Math.max(12, 18 * this.viewZoom);
+          const lx = cpt.x + Math.cos(angleRad) * labelDist;
+          const ly = cpt.y + Math.sin(angleRad) * labelDist;
+
+          // guide tick
+          ctx.beginPath();
+          ctx.moveTo(cpt.x, cpt.y);
+          ctx.lineTo(lx, ly);
+          ctx.strokeStyle = "rgba(148, 163, 184, 0.6)";
+          ctx.lineWidth = Math.max(1, 1.5 * this.viewZoom);
+          ctx.stroke();
+
+          // marker point
+          ctx.beginPath();
+          ctx.arc(cpt.x, cpt.y, Math.max(1.5, 2.5 * this.viewZoom), 0, Math.PI * 2);
+          ctx.fillStyle = "rgba(226, 232, 240, 0.9)";
+          ctx.fill();
+
+          const label = `T${corner.number}${corner.letter || ""}`;
+          ctx.font = `bold ${Math.max(7, 9 * this.viewZoom)}px monospace`;
+          ctx.textAlign = "center";
+          ctx.fillStyle = "rgba(226, 232, 240, 0.95)";
+          ctx.strokeStyle = "rgba(15, 23, 42, 0.8)";
+          ctx.lineWidth = Math.max(1.5, 2 * this.viewZoom);
+          ctx.strokeText(label, lx, ly - 2);
+          ctx.fillText(label, lx, ly - 2);
+        }
       }
-    }
-
-    if (this.circuitImageLoaded && this.circuitImage) {
-      const trackWidthPx = rangeX * scale;
-      const trackHeightPx = rangeY * scale;
-      const targetW = trackWidthPx * 1.15;
-      const targetH = trackHeightPx * 1.15;
-
-      const imgW = this.circuitImage.width || 1;
-      const imgH = this.circuitImage.height || 1;
-      const ratio = Math.min(targetW / imgW, targetH / imgH);
-
-      const drawW = imgW * ratio * this.viewZoom;
-      const drawH = imgH * ratio * this.viewZoom;
-
-      const cx = w / 2 + this.viewPanX;
-      const cy = h / 2 + this.viewPanY;
-
-      ctx.save();
-      ctx.globalAlpha = 0.16;
-      ctx.drawImage(this.circuitImage, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
-      ctx.restore();
     }
 
     for (const [, car] of entries) {
@@ -898,9 +849,9 @@ const TrackMap = {
     ctx.fillStyle = "rgba(180,180,180,0.8)";
     ctx.fillText("Scroll: zoom | Drag: pan | Double-click: reset", 12, 38);
 
-    if (trackPath.length <= 1 && this.trackCloud.length > 0) {
+    if (trackPath.length <= 1) {
       ctx.fillStyle = "rgba(180,180,180,0.7)";
-      ctx.fillText("Building track outline...", 12, 56);
+      ctx.fillText("Waiting for circuit info...", 12, 56);
     }
   },
 
