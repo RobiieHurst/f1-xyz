@@ -148,6 +148,10 @@ defmodule F1Tracker.F1.ReplayServer do
 
     # Fetch fresh chunk at seek position and resume
     send(self(), {:fetch_chunk, target_ts})
+
+    # Sync race control feed with seek target
+    broadcast("race_control:update", race_control_up_to_cursor(state.race_control, target_ts))
+
     broadcast_replay_state(new_state)
     {:noreply, new_state}
   end
@@ -171,7 +175,8 @@ defmodule F1Tracker.F1.ReplayServer do
       progress: compute_progress(state),
       replay_cursor: state.replay_cursor && DateTime.to_iso8601(state.replay_cursor),
       session_start: state.session_start && DateTime.to_iso8601(state.session_start),
-      session_end: state.session_end && DateTime.to_iso8601(state.session_end)
+      session_end: state.session_end && DateTime.to_iso8601(state.session_end),
+      track_outline: state.track_outline
     }
 
     {:reply, reply, state}
@@ -233,14 +238,14 @@ defmodule F1Tracker.F1.ReplayServer do
     # Broadcast static data
     broadcast("stints:update", stints)
     if weather, do: broadcast("weather:update", weather)
-    broadcast("race_control:update", race_control)
+    broadcast("race_control:update", [])
     broadcast("team_radio:update", team_radio)
     broadcast("sectors:update", %{best: best_sectors, personal: personal_best_sectors})
 
     new_state =
       if track_outline != [] do
         broadcast("track_outline:update", track_outline)
-        %{new_state | has_track_outline: true}
+        %{new_state | has_track_outline: true, track_outline: track_outline}
       else
         new_state
       end
@@ -265,14 +270,20 @@ defmodule F1Tracker.F1.ReplayServer do
     records = fetch_location_chunk(sk, from_dt, chunk_end)
 
     # Build track outline from first chunk if we don't have one yet
-    if not state.has_track_outline and records != [] do
-      outline = build_outline_from_chunk(records)
+    chunk_outline =
+      if not state.has_track_outline and records != [] do
+        outline = build_outline_from_chunk(records)
 
-      if outline != [] do
-        Logger.info("ReplayServer built track outline from chunk: #{length(outline)} points")
-        broadcast("track_outline:update", outline)
+        if outline != [] do
+          Logger.info("ReplayServer built track outline from chunk: #{length(outline)} points")
+          broadcast("track_outline:update", outline)
+          outline
+        else
+          []
+        end
+      else
+        []
       end
-    end
 
     new_state = %{
       state
@@ -280,7 +291,8 @@ defmodule F1Tracker.F1.ReplayServer do
         chunk_start: state.chunk_start || from_dt,
         chunk_end: chunk_end,
         next_chunk: nil,
-        has_track_outline: state.has_track_outline or records != []
+        has_track_outline: state.has_track_outline or chunk_outline != [],
+        track_outline: if(chunk_outline != [], do: chunk_outline, else: state.track_outline)
     }
 
     # Start ticking if not paused
@@ -321,7 +333,7 @@ defmodule F1Tracker.F1.ReplayServer do
       new_state = %{state | replay_cursor: new_cursor, wall_start: now_wall}
 
       # Emit current snapshot
-      emit_snapshot(new_state, new_cursor)
+      emit_snapshot(new_state, state.replay_cursor, new_cursor)
 
       # Check if we need to advance to next chunk
       new_state = maybe_advance_chunk(new_state, new_cursor)
@@ -344,7 +356,7 @@ defmodule F1Tracker.F1.ReplayServer do
 
   # -- Private: Snapshot Emission --
 
-  defp emit_snapshot(state, cursor) do
+  defp emit_snapshot(state, prev_cursor, cursor) do
     cursor_str = DateTime.to_iso8601(cursor)
 
     # Find locations at cursor time from current chunk
@@ -375,8 +387,35 @@ defmodule F1Tracker.F1.ReplayServer do
       broadcast("intervals:update", intervals)
     end
 
+    race_control_new = race_control_new_events(state.race_control, prev_cursor, cursor)
+
+    if race_control_new != [] do
+      broadcast("race_control:new", race_control_new)
+    end
+
     # Broadcast replay progress
     broadcast_replay_state(state)
+  end
+
+  defp race_control_new_events(events, prev_cursor, cursor) do
+    prev_str = DateTime.to_iso8601(prev_cursor)
+    cursor_str = DateTime.to_iso8601(cursor)
+
+    Enum.filter(events, fn event ->
+      event_ts = event["date"] || event[:date]
+      event_ts && event_ts > prev_str && event_ts <= cursor_str
+    end)
+  end
+
+  defp race_control_up_to_cursor(events, cursor) do
+    cursor_str = DateTime.to_iso8601(cursor)
+
+    events
+    |> Enum.filter(fn event ->
+      event_ts = event["date"] || event[:date]
+      event_ts && event_ts <= cursor_str
+    end)
+    |> Enum.take(-10)
   end
 
   defp locations_at(chunk, cursor_str, _drivers) do
@@ -503,38 +542,43 @@ defmodule F1Tracker.F1.ReplayServer do
 
   @doc false
   defp fetch_track_outline(session_key, session_start, drivers) do
-    # Fetch ~100 seconds of location data for one driver to trace a full lap.
-    # Start 5 minutes in to avoid formation lap / grid positions.
-    outline_start = DateTime.add(session_start, 300, :second)
-    outline_end = DateTime.add(outline_start, 100, :second)
+    # Fetch a wide window after race start and derive the best valid
+    # closed-loop outline from whichever driver has usable trajectory.
+    if map_size(drivers) == 0 do
+      []
+    else
+      outline_start = DateTime.add(session_start, 120, :second)
+      outline_end = DateTime.add(outline_start, 900, :second)
 
-    # Pick the first available driver number
-    driver_num =
-      case Map.keys(drivers) do
-        [first | _] -> first
-        [] -> nil
-      end
-
-    if driver_num do
       from_str = DateTime.to_iso8601(outline_start)
       to_str = DateTime.to_iso8601(outline_end)
 
-      case Client.get_location_for_driver(session_key, driver_num, from_str, to_str) do
-        {:ok, data} when is_list(data) and data != [] ->
-          Logger.info(
-            "ReplayServer fetched track outline: #{length(data)} points from driver #{driver_num}"
-          )
-
-          # Extract ordered (x, y) pairs, filtering teleports (pit lane jumps)
-          build_clean_outline(data)
+      case Client.get_location_range(session_key, from_str, to_str) do
+        {:ok, data} when is_list(data) and length(data) > 100 ->
+          outline = build_outline_from_bulk_locations(data)
+          Logger.info("ReplayServer fetched track outline: #{length(outline)} points")
+          outline
 
         _ ->
           Logger.warning("ReplayServer: track outline fetch returned no data")
           []
       end
-    else
-      []
     end
+  end
+
+  defp build_outline_from_bulk_locations(data) do
+    data
+    |> Enum.group_by(& &1["driver_number"])
+    |> Enum.sort_by(fn {_driver, entries} -> length(entries) end, :desc)
+    |> Enum.reduce_while([], fn {_driver, entries}, _acc ->
+      outline = build_clean_outline(entries)
+
+      if valid_outline?(outline) do
+        {:halt, outline}
+      else
+        {:cont, []}
+      end
+    end)
   end
 
   defp build_outline_from_chunk(records) do
@@ -574,6 +618,20 @@ defmodule F1Tracker.F1.ReplayServer do
       end
     end)
     |> Enum.reverse()
+  end
+
+  defp valid_outline?(outline) do
+    if length(outline) < 120 do
+      false
+    else
+      first = hd(outline)
+      last = List.last(outline)
+      dx = first.x - last.x
+      dy = first.y - last.y
+      closure_dist = :math.sqrt(dx * dx + dy * dy)
+
+      closure_dist < 1_200
+    end
   end
 
   # -- Private: Data Fetching --
@@ -731,6 +789,7 @@ defmodule F1Tracker.F1.ReplayServer do
       chunk_end: nil,
       tick_ref: nil,
       has_track_outline: false,
+      track_outline: [],
       # Bulk data
       all_positions: [],
       all_laps: %{},

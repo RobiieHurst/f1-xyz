@@ -69,9 +69,11 @@ defmodule F1Tracker.F1.SessionServer do
       last_position_ts: nil,
       last_drs_ts: nil,
       last_radio_ts: nil,
+      last_race_control_ts: nil,
       replay_mode: false,
       replay_from: nil,
-      session_meta: nil
+      session_meta: nil,
+      track_outline: []
     }
 
     {:ok, state}
@@ -124,32 +126,49 @@ defmodule F1Tracker.F1.SessionServer do
       Logger.info("Completed session detected, starting replay")
       # Delegate to ReplayServer for completed sessions
       F1Tracker.F1.ReplayServer.start_replay(session_key, session_meta, drivers)
-      broadcast("session:started", %{session_key: session_key, drivers: drivers})
+
+      broadcast("session:started", %{
+        session_key: session_key,
+        drivers: drivers,
+        session_meta: session_meta
+      })
+
       {:noreply, new_state}
     else
       # Live session — start incremental polling
       schedule_poll(:locations)
       schedule_poll(:timing)
       schedule_poll(:race_control)
-      broadcast("session:started", %{session_key: session_key, drivers: drivers})
+
+      broadcast("session:started", %{
+        session_key: session_key,
+        drivers: drivers,
+        session_meta: session_meta
+      })
 
       # Fetch track outline in background for live sessions that have been running
       send(self(), :fetch_track_outline)
 
-      {:noreply, new_state}
+      now_iso = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+      {:noreply, %{new_state | last_race_control_ts: now_iso}}
     end
   end
 
   @impl true
   def handle_info({:init_replay, session_key, from_timestamp}, state) do
     drivers = fetch_drivers(session_key)
+    session_meta = fetch_session_meta(session_key)
 
-    broadcast("session:started", %{session_key: session_key, drivers: drivers})
+    broadcast("session:started", %{
+      session_key: session_key,
+      drivers: drivers,
+      session_meta: session_meta
+    })
 
     # Fetch historical data from that point
     send(self(), {:fetch_historical, from_timestamp})
 
-    {:noreply, %{state | drivers: drivers}}
+    {:noreply, %{state | drivers: drivers, session_meta: session_meta}}
   end
 
   @impl true
@@ -242,10 +261,18 @@ defmodule F1Tracker.F1.SessionServer do
   @impl true
   def handle_info({:poll, :race_control}, %{tracking: true, session_key: sk} = state) do
     new_state =
-      case Client.get_race_control(%{session_key: sk}) do
-        {:ok, data} when is_list(data) ->
-          broadcast("race_control:update", data)
-          %{state | race_control: data}
+      case Client.get_race_control(build_params(sk, state.last_race_control_ts)) do
+        {:ok, data} when is_list(data) and data != [] ->
+          merged =
+            (state.race_control ++ data)
+            |> Enum.uniq_by(fn msg ->
+              {msg["date"], msg["message"], msg["driver_number"]}
+            end)
+            |> Enum.take(-30)
+
+          broadcast("race_control:update", merged)
+
+          %{state | race_control: merged, last_race_control_ts: get_latest_timestamp(data)}
 
         _ ->
           state
@@ -341,32 +368,32 @@ defmodule F1Tracker.F1.SessionServer do
   @impl true
   def handle_info(:fetch_track_outline, %{session_key: sk, drivers: drivers} = state)
       when is_integer(sk) and map_size(drivers) > 0 do
-    # For live sessions, fetch a recent ~100s of one driver's location data
-    # to build a track outline. Use data from ~2 minutes ago to now.
+    # For live sessions, fetch a wider recent window and derive an outline
+    # from the best driver trajectory in that window.
     now = DateTime.utc_now()
-    from = DateTime.add(now, -100, :second)
-    driver_num = drivers |> Map.keys() |> List.first()
+    from = DateTime.add(now, -900, :second)
+    from_str = DateTime.to_iso8601(from)
+    to_str = DateTime.to_iso8601(now)
 
-    if driver_num do
-      from_str = DateTime.to_iso8601(from)
-      to_str = DateTime.to_iso8601(now)
+    case Client.get_location_range(sk, from_str, to_str) do
+      {:ok, data} when is_list(data) and length(data) > 100 ->
+        outline = build_track_outline_from_locations(data)
 
-      case Client.get_location_for_driver(sk, driver_num, from_str, to_str) do
-        {:ok, data} when is_list(data) and length(data) > 10 ->
-          outline = build_track_outline(data)
-
-          if outline != [] do
-            Logger.info("SessionServer fetched track outline: #{length(outline)} points")
-            broadcast("track_outline:update", outline)
-          end
-
-        _ ->
-          # Not enough data yet — retry in 30 seconds
+        if outline != [] do
+          Logger.info("SessionServer fetched track outline: #{length(outline)} points")
+          broadcast("track_outline:update", outline)
+          {:noreply, %{state | track_outline: outline}}
+        else
+          # Outline shape not reliable yet — retry later
           Process.send_after(self(), :fetch_track_outline, 30_000)
-      end
-    end
+          {:noreply, state}
+        end
 
-    {:noreply, state}
+      _ ->
+        # Not enough data yet — retry in 30 seconds
+        Process.send_after(self(), :fetch_track_outline, 30_000)
+        {:noreply, state}
+    end
   end
 
   @impl true
@@ -375,29 +402,61 @@ defmodule F1Tracker.F1.SessionServer do
   # -- Private Helpers --
 
   defp build_track_outline(data) do
+    outline =
+      data
+      |> Enum.sort_by(& &1["date"])
+      |> Enum.reduce([], fn record, acc ->
+        x = record["x"]
+        y = record["y"]
+
+        case acc do
+          [] ->
+            [%{x: x, y: y}]
+
+          [prev | _] ->
+            dx = x - prev.x
+            dy = y - prev.y
+            dist = :math.sqrt(dx * dx + dy * dy)
+
+            cond do
+              dist < 20 -> acc
+              dist > 5000 -> acc
+              true -> [%{x: x, y: y} | acc]
+            end
+        end
+      end)
+      |> Enum.reverse()
+
+    if valid_outline?(outline), do: outline, else: []
+  end
+
+  defp build_track_outline_from_locations(data) do
     data
-    |> Enum.sort_by(& &1["date"])
-    |> Enum.reduce([], fn record, acc ->
-      x = record["x"]
-      y = record["y"]
+    |> Enum.group_by(& &1["driver_number"])
+    |> Enum.sort_by(fn {_driver, entries} -> length(entries) end, :desc)
+    |> Enum.reduce_while([], fn {_driver, entries}, _acc ->
+      outline = build_track_outline(entries)
 
-      case acc do
-        [] ->
-          [%{x: x, y: y}]
-
-        [prev | _] ->
-          dx = x - prev.x
-          dy = y - prev.y
-          dist = :math.sqrt(dx * dx + dy * dy)
-
-          cond do
-            dist < 20 -> acc
-            dist > 5000 -> acc
-            true -> [%{x: x, y: y} | acc]
-          end
+      if outline != [] do
+        {:halt, outline}
+      else
+        {:cont, []}
       end
     end)
-    |> Enum.reverse()
+  end
+
+  defp valid_outline?(outline) do
+    if length(outline) < 120 do
+      false
+    else
+      first = hd(outline)
+      last = List.last(outline)
+      dx = first.x - last.x
+      dy = first.y - last.y
+      closure_dist = :math.sqrt(dx * dx + dy * dy)
+
+      closure_dist < 1_200
+    end
   end
 
   defp reset_session_state(state, session_key) do
@@ -425,7 +484,9 @@ defmodule F1Tracker.F1.SessionServer do
         last_position_ts: nil,
         last_drs_ts: nil,
         last_radio_ts: nil,
-        session_meta: nil
+        last_race_control_ts: nil,
+        session_meta: nil,
+        track_outline: []
     }
   end
 
@@ -436,7 +497,11 @@ defmodule F1Tracker.F1.SessionServer do
           date_start: session["date_start"],
           date_end: session["date_end"],
           session_type: session["session_type"],
-          session_name: session["session_name"]
+          session_name: session["session_name"],
+          circuit_key: session["circuit_key"],
+          circuit_short_name: session["circuit_short_name"],
+          country_name: session["country_name"],
+          location: session["location"]
         }
 
       _ ->

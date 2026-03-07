@@ -19,6 +19,7 @@ defmodule F1TrackerWeb.TrackerLive do
       socket
       |> assign(:sessions, [])
       |> assign(:selected_session, nil)
+      |> assign(:session_meta, nil)
       |> assign(:tracking, false)
       |> assign(:drivers, %{})
       |> assign(:locations, %{})
@@ -162,6 +163,22 @@ defmodule F1TrackerWeb.TrackerLive do
   # -- PubSub Handlers --
 
   @impl true
+  def handle_info(
+        {"session:started", %{session_key: sk, drivers: drivers, session_meta: session_meta}},
+        socket
+      ) do
+    {:noreply,
+     socket
+     |> assign(:selected_session, sk)
+     |> assign(:session_meta, session_meta)
+     |> assign(:drivers, drivers)
+     |> assign(:tracking, true)
+     |> assign(:loading, false)
+     |> push_event("drivers_loaded", %{drivers: drivers})
+     |> push_event("session_meta", %{session: session_meta})}
+  end
+
+  @impl true
   def handle_info({"session:started", %{session_key: sk, drivers: drivers}}, socket) do
     {:noreply,
      socket
@@ -206,6 +223,19 @@ defmodule F1TrackerWeb.TrackerLive do
   @impl true
   def handle_info({"race_control:update", messages}, socket) do
     {:noreply, assign(socket, :race_control, Enum.take(messages, -10))}
+  end
+
+  @impl true
+  def handle_info({"race_control:new", messages}, socket) do
+    merged =
+      (socket.assigns.race_control ++ messages)
+      |> Enum.uniq_by(fn msg ->
+        {msg["date"] || msg[:date], msg["message"] || msg[:message],
+         msg["driver_number"] || msg[:driver_number]}
+      end)
+      |> Enum.take(-10)
+
+    {:noreply, assign(socket, :race_control, merged)}
   end
 
   @impl true
@@ -274,10 +304,12 @@ defmodule F1TrackerWeb.TrackerLive do
   @impl true
   def handle_info(:load_current_state, socket) do
     state = try_get_state()
+    replay_state = F1Tracker.F1.ReplayServer.get_state()
 
     socket =
       socket
       |> assign(:selected_session, state[:session_key])
+      |> assign(:session_meta, state[:session_meta])
       |> assign(:tracking, state[:tracking] || false)
       |> assign(:drivers, state[:drivers] || %{})
       |> assign(:locations, state[:locations] || %{})
@@ -293,7 +325,28 @@ defmodule F1TrackerWeb.TrackerLive do
       |> assign(:team_radio, state[:team_radio] || [])
 
     if state[:tracking] && map_size(state[:drivers] || %{}) > 0 do
-      {:noreply, push_event(socket, "drivers_loaded", %{drivers: state[:drivers]})}
+      socket = push_event(socket, "drivers_loaded", %{drivers: state[:drivers]})
+
+      socket =
+        if state[:session_meta] do
+          push_event(socket, "session_meta", %{session: state[:session_meta]})
+        else
+          socket
+        end
+
+      socket =
+        cond do
+          is_list(state[:track_outline]) and state[:track_outline] != [] ->
+            push_event(socket, "track_outline", %{points: state[:track_outline]})
+
+          is_list(replay_state[:track_outline]) and replay_state[:track_outline] != [] ->
+            push_event(socket, "track_outline", %{points: replay_state[:track_outline]})
+
+          true ->
+            socket
+        end
+
+      {:noreply, socket}
     else
       {:noreply, socket}
     end
@@ -334,7 +387,7 @@ defmodule F1TrackerWeb.TrackerLive do
       latest =
         case Map.get(timing[:laps] || %{}, driver_num) do
           nil -> nil
-          laps -> List.last(laps)
+          laps -> latest_valid_lap(laps)
         end
 
       # Interval/gap data
@@ -363,13 +416,10 @@ defmodule F1TrackerWeb.TrackerLive do
   defp format_lap_time_short(nil), do: nil
 
   defp format_lap_time_short(duration) when is_float(duration) do
-    minutes = trunc(duration / 60)
-    seconds = duration - minutes * 60
-
-    if minutes > 0 do
-      "#{minutes}:#{:io_lib.format("~5.2f", [seconds])}"
+    if valid_lap_duration?(duration) do
+      format_lap_duration(duration, 2)
     else
-      :io_lib.format("~5.2f", [seconds]) |> to_string() |> String.trim()
+      nil
     end
   end
 
@@ -456,13 +506,10 @@ defmodule F1TrackerWeb.TrackerLive do
   def format_lap_time(nil), do: "-"
 
   def format_lap_time(duration) when is_float(duration) do
-    minutes = trunc(duration / 60)
-    seconds = duration - minutes * 60
-
-    if minutes > 0 do
-      "#{minutes}:#{:io_lib.format("~6.3f", [seconds])}"
+    if valid_lap_duration?(duration) do
+      format_lap_duration(duration, 3)
     else
-      :io_lib.format("~6.3f", [seconds]) |> to_string() |> String.trim()
+      "-"
     end
   end
 
@@ -475,7 +522,7 @@ defmodule F1TrackerWeb.TrackerLive do
   def latest_lap(laps, driver_number) do
     case Map.get(laps, driver_number) do
       nil -> nil
-      driver_laps -> List.last(driver_laps)
+      driver_laps -> latest_valid_lap(driver_laps)
     end
   end
 
@@ -536,8 +583,53 @@ defmodule F1TrackerWeb.TrackerLive do
 
       driver_laps ->
         driver_laps
-        |> Enum.filter(& &1.lap_duration)
+        |> Enum.filter(fn lap -> valid_lap_duration?(lap.lap_duration) end)
         |> Enum.min_by(& &1.lap_duration, fn -> nil end)
+    end
+  end
+
+  defp latest_valid_lap(driver_laps) do
+    driver_laps
+    |> Enum.reverse()
+    |> Enum.find(fn lap -> valid_lap_duration?(lap.lap_duration) end)
+  end
+
+  defp valid_lap_duration?(duration) when is_float(duration),
+    do: duration >= 20.0 and duration <= 300.0
+
+  defp valid_lap_duration?(_), do: false
+
+  defp format_lap_duration(duration, 2) do
+    total_cs = round(duration * 100)
+    minutes = div(total_cs, 6_000)
+    remaining_cs = rem(total_cs, 6_000)
+    seconds = div(remaining_cs, 100)
+    centis = rem(remaining_cs, 100)
+
+    formatted_seconds = :io_lib.format("~2..0B", [seconds]) |> to_string()
+    formatted_centis = :io_lib.format("~2..0B", [centis]) |> to_string()
+
+    if minutes > 0 do
+      "#{minutes}:#{formatted_seconds}.#{formatted_centis}"
+    else
+      "#{seconds}.#{formatted_centis}"
+    end
+  end
+
+  defp format_lap_duration(duration, 3) do
+    total_ms = round(duration * 1_000)
+    minutes = div(total_ms, 60_000)
+    remaining_ms = rem(total_ms, 60_000)
+    seconds = div(remaining_ms, 1_000)
+    millis = rem(remaining_ms, 1_000)
+
+    formatted_seconds = :io_lib.format("~2..0B", [seconds]) |> to_string()
+    formatted_millis = :io_lib.format("~3..0B", [millis]) |> to_string()
+
+    if minutes > 0 do
+      "#{minutes}:#{formatted_seconds}.#{formatted_millis}"
+    else
+      "#{seconds}.#{formatted_millis}"
     end
   end
 
