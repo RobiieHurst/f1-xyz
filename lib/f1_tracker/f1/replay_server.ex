@@ -18,6 +18,7 @@ defmodule F1Tracker.F1.ReplayServer do
 
   alias F1Tracker.DataProvider
   alias F1Tracker.F1.TrackOutlineCache
+  alias F1Tracker.OpenF1.ReplayCache
 
   @pubsub F1Tracker.PubSub
   # Real-time interval between replay ticks
@@ -26,6 +27,7 @@ defmodule F1Tracker.F1.ReplayServer do
   @chunk_seconds 60
   # Pre-fetch next chunk when we're within this many seconds of chunk end
   @prefetch_threshold_seconds 15
+  @default_autowarm_interval_ms 2_500
 
   # -- Public API --
 
@@ -86,8 +88,11 @@ defmodule F1Tracker.F1.ReplayServer do
   end
 
   @impl true
-  def handle_cast({:start_replay, session_key, session_meta, drivers}, _state) do
+  def handle_cast({:start_replay, session_key, session_meta, drivers}, state) do
     Logger.info("ReplayServer starting replay for session #{session_key}")
+
+    if state.tick_ref, do: Process.cancel_timer(state.tick_ref)
+    if state.warm_ref, do: Process.cancel_timer(state.warm_ref)
 
     state = %{
       initial_state()
@@ -210,6 +215,7 @@ defmodule F1Tracker.F1.ReplayServer do
   @impl true
   def handle_cast(:stop_replay, state) do
     if state.tick_ref, do: Process.cancel_timer(state.tick_ref)
+    if state.warm_ref, do: Process.cancel_timer(state.warm_ref)
     {:noreply, initial_state()}
   end
 
@@ -361,6 +367,13 @@ defmodule F1Tracker.F1.ReplayServer do
         track_outline: if(chunk_outline != [], do: chunk_outline, else: state.track_outline)
     }
 
+    new_state =
+      if is_nil(new_state.warm_cursor) do
+        %{new_state | warm_cursor: chunk_end}
+      else
+        new_state
+      end
+
     # Start ticking if not paused
     new_state =
       if not new_state.paused do
@@ -370,6 +383,8 @@ defmodule F1Tracker.F1.ReplayServer do
       else
         new_state
       end
+
+    new_state = maybe_schedule_autowarm(new_state)
 
     {:noreply, new_state}
   end
@@ -430,6 +445,31 @@ defmodule F1Tracker.F1.ReplayServer do
   def handle_info(:replay_tick, state) do
     # Not active or paused, ignore
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:warm_cache_chunk, %{active: true} = state) do
+    state = %{state | warm_ref: nil}
+
+    new_state =
+      with true <- autowarm_enabled?(),
+           true <- ReplayCache.available?(),
+           %DateTime{} = from_dt <- state.warm_cursor,
+           true <- DateTime.compare(from_dt, state.session_end) == :lt do
+        to_dt =
+          from_dt
+          |> DateTime.add(@chunk_seconds, :second)
+          |> clamp_datetime(state.session_start, state.session_end)
+
+        _ = fetch_location_chunk(state.session_key, from_dt, to_dt)
+        _ = fetch_car_data_chunk(state.session_key, from_dt, to_dt)
+
+        %{state | warm_cursor: to_dt}
+      else
+        _ -> state
+      end
+
+    {:noreply, maybe_schedule_autowarm(new_state)}
   end
 
   @impl true
@@ -649,9 +689,19 @@ defmodule F1Tracker.F1.ReplayServer do
     from_str = DateTime.to_iso8601(from_dt)
     to_str = DateTime.to_iso8601(to_dt)
 
-    case DataProvider.get_location_range(session_key, from_str, to_str) do
-      {:ok, data} when is_list(data) -> data
-      _ -> []
+    case ReplayCache.get("location", session_key, from_str, to_str) do
+      {:ok, data} when is_list(data) ->
+        data
+
+      _ ->
+        case DataProvider.get_location_range(session_key, from_str, to_str) do
+          {:ok, data} when is_list(data) ->
+            ReplayCache.put("location", session_key, from_str, to_str, data)
+            data
+
+          _ ->
+            []
+        end
     end
   end
 
@@ -659,11 +709,21 @@ defmodule F1Tracker.F1.ReplayServer do
     from_str = DateTime.to_iso8601(from_dt)
     to_str = DateTime.to_iso8601(to_dt)
 
-    params = [{"session_key", session_key}, {"date>", from_str}, {"date<", to_str}]
+    case ReplayCache.get("car_data", session_key, from_str, to_str) do
+      {:ok, data} when is_list(data) ->
+        data
 
-    case DataProvider.get_car_data(params) do
-      {:ok, data} when is_list(data) -> data
-      _ -> []
+      _ ->
+        params = [{"session_key", session_key}, {"date>", from_str}, {"date<", to_str}]
+
+        case DataProvider.get_car_data(params) do
+          {:ok, data} when is_list(data) ->
+            ReplayCache.put("car_data", session_key, from_str, to_str, data)
+            data
+
+          _ ->
+            []
+        end
     end
   end
 
@@ -979,6 +1039,8 @@ defmodule F1Tracker.F1.ReplayServer do
       chunk_start: nil,
       chunk_end: nil,
       tick_ref: nil,
+      warm_ref: nil,
+      warm_cursor: nil,
       has_track_outline: false,
       track_outline: [],
       # Bulk data
@@ -997,6 +1059,47 @@ defmodule F1Tracker.F1.ReplayServer do
   defp schedule_tick(state) do
     ref = Process.send_after(self(), :replay_tick, @tick_interval_ms)
     %{state | tick_ref: ref}
+  end
+
+  defp maybe_schedule_autowarm(state) do
+    cond do
+      not autowarm_enabled?() ->
+        state
+
+      not state.active ->
+        state
+
+      state.loading ->
+        state
+
+      state.warm_ref != nil ->
+        state
+
+      not ReplayCache.available?() ->
+        state
+
+      is_nil(state.warm_cursor) or is_nil(state.session_end) ->
+        state
+
+      DateTime.compare(state.warm_cursor, state.session_end) != :lt ->
+        state
+
+      true ->
+        ref = Process.send_after(self(), :warm_cache_chunk, autowarm_interval_ms())
+        %{state | warm_ref: ref}
+    end
+  end
+
+  defp autowarm_enabled? do
+    Application.get_env(:f1_tracker, :openf1_replay_autowarm, true)
+  end
+
+  defp autowarm_interval_ms do
+    Application.get_env(
+      :f1_tracker,
+      :openf1_replay_autowarm_interval_ms,
+      @default_autowarm_interval_ms
+    )
   end
 
   defp compute_progress(%{session_start: nil}), do: 0.0

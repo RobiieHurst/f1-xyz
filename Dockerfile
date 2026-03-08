@@ -14,6 +14,7 @@
 ARG ELIXIR_VERSION=1.16.3
 ARG OTP_VERSION=26.2.5.2
 ARG DEBIAN_VERSION=trixie-20260223-slim
+ARG DUCKDB_VERSION=v1.2.1
 
 ARG BUILDER_IMAGE="docker.io/hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
 ARG RUNNER_IMAGE="docker.io/debian:${DEBIAN_VERSION}"
@@ -70,8 +71,24 @@ RUN mix release
 # the compiled release and other runtime necessities
 FROM ${RUNNER_IMAGE} AS final
 
+ARG DUCKDB_VERSION
+
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends libstdc++6 openssl libncurses6 locales ca-certificates \
+  && apt-get install -y --no-install-recommends libstdc++6 openssl libncurses6 locales ca-certificates curl unzip \
+  && if ! apt-get install -y --no-install-recommends duckdb; then \
+       ARCH="$(dpkg --print-architecture)"; \
+       case "$ARCH" in \
+         amd64) DUCK_ARCH_DASH="linux-amd64"; DUCK_ARCH_UNDERSCORE="linux_amd64" ;; \
+         arm64) DUCK_ARCH_DASH="linux-arm64"; DUCK_ARCH_UNDERSCORE="linux_arm64" ;; \
+         *) echo "Unsupported arch for DuckDB: $ARCH"; exit 1 ;; \
+       esac; \
+       URL1="https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-${DUCK_ARCH_DASH}.zip"; \
+       URL2="https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-${DUCK_ARCH_UNDERSCORE}.zip"; \
+       (curl -fsSL "$URL1" -o /tmp/duckdb.zip || curl -fsSL "$URL2" -o /tmp/duckdb.zip); \
+       unzip -o /tmp/duckdb.zip -d /usr/local/bin; \
+       chmod +x /usr/local/bin/duckdb; \
+       rm -f /tmp/duckdb.zip; \
+     fi \
   && rm -rf /var/lib/apt/lists/*
 
 # Set the locale

@@ -127,6 +127,22 @@ defmodule F1Tracker.OpenF1.Client do
   # -- Private --
 
   defp get(path, params) do
+    ttl_ms = cache_ttl_ms(path, params)
+
+    if ttl_ms > 0 do
+      case F1Tracker.OpenF1.ResponseCache.get(path, params) do
+        {:ok, payload} ->
+          {:ok, payload}
+
+        :miss ->
+          fetch_and_maybe_cache(path, params, ttl_ms)
+      end
+    else
+      fetch_and_maybe_cache(path, params, 0)
+    end
+  end
+
+  defp fetch_and_maybe_cache(path, params, ttl_ms) do
     url = @base_url <> path
     headers = auth_headers()
 
@@ -138,6 +154,7 @@ defmodule F1Tracker.OpenF1.Client do
            max_retries: 5
          ) do
       {:ok, %Req.Response{status: 200, body: body}} ->
+        if ttl_ms > 0, do: F1Tracker.OpenF1.ResponseCache.put(path, params, body, ttl_ms)
         {:ok, body}
 
       {:ok, %Req.Response{status: status, body: body}} ->
@@ -147,6 +164,32 @@ defmodule F1Tracker.OpenF1.Client do
         {:error, reason}
     end
   end
+
+  defp cache_ttl_ms(path, params) do
+    cond do
+      historical_range_request?(params) ->
+        # Replay + fixed ranges are immutable and safe to cache aggressively.
+        :timer.hours(12)
+
+      path in ["/sessions", "/meetings", "/drivers"] ->
+        :timer.minutes(30)
+
+      path in ["/location", "/car_data"] ->
+        # Live feed endpoints: keep very short to avoid stale movement.
+        :timer.seconds(2)
+
+      true ->
+        # Timing/race-control endpoints update often during live sessions.
+        :timer.seconds(5)
+    end
+  end
+
+  defp historical_range_request?(params) when is_list(params) do
+    keys = Enum.map(params, fn {k, _v} -> to_string(k) end)
+    "date<" in keys and "date>" in keys
+  end
+
+  defp historical_range_request?(_), do: false
 
   # Exponential backoff: 1s, 2s, 4s, 8s, 16s
   defp retry_delay(attempt) do

@@ -30,6 +30,32 @@ config :f1_tracker, :openf1,
   username: System.get_env("OPENF1_USERNAME"),
   password: System.get_env("OPENF1_PASSWORD")
 
+config :f1_tracker,
+       :openf1_cache_file,
+       System.get_env("OPENF1_CACHE_FILE") ||
+         Path.join(System.tmp_dir!(), "f1_tracker_openf1_cache.dets")
+
+openf1_replay_cache_dir =
+  System.get_env("OPENF1_REPLAY_CACHE_DIR") ||
+    Path.join(System.tmp_dir!(), "f1_tracker_replay_cache")
+
+config :f1_tracker,
+       :openf1_replay_cache_dir,
+       openf1_replay_cache_dir
+
+config :f1_tracker,
+       :openf1_replay_cache_db,
+       System.get_env("OPENF1_REPLAY_CACHE_DB") ||
+         Path.join(openf1_replay_cache_dir, "replay_cache.duckdb")
+
+config :f1_tracker,
+       :openf1_replay_autowarm,
+       String.downcase(System.get_env("OPENF1_REPLAY_AUTOWARM", "true")) in ["1", "true", "yes"]
+
+config :f1_tracker,
+       :openf1_replay_autowarm_interval_ms,
+       String.to_integer(System.get_env("OPENF1_REPLAY_AUTOWARM_INTERVAL_MS", "2500"))
+
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you

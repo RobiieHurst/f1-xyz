@@ -17,6 +17,7 @@ Real-time Formula 1 tracker built with Phoenix LiveView and OpenF1.
   - Primary: OpenF1 MQTT (`v1/location`, `v1/car_data`)
   - Fallback: OpenF1 REST polling
 - **Replay/historical**: OpenF1 REST range queries
+- **Replay cache**: DuckDB chunk cache + per-session Parquet exports
 
 ## Architecture
 
@@ -47,6 +48,29 @@ Open `http://localhost:4000`, load sessions, and start tracking.
 - MQTT stream process: `F1Tracker.OpenF1.MQTTStream`
 - Topics consumed: `v1/location`, `v1/car_data`
 - MQTT updates are merged into `SessionServer` live state and broadcast via PubSub
+
+## Replay Caching (DuckDB + Parquet)
+
+- Replay chunk reads now go through `F1Tracker.OpenF1.ReplayCache` first
+- Cache key: `endpoint + session_key + from_iso + to_iso`
+- On cache miss, data is fetched from OpenF1, then persisted to DuckDB
+- Parquet snapshots are exported per session and endpoint:
+  - `location_session_<session_key>.parquet`
+  - `car_data_session_<session_key>.parquet`
+
+Environment variables:
+
+- `OPENF1_REPLAY_CACHE_DIR` (default: `/tmp/f1_tracker_replay_cache`)
+- `OPENF1_REPLAY_CACHE_DB` (default: `<cache_dir>/replay_cache.duckdb`)
+- `OPENF1_REPLAY_AUTOWARM` (default: `true`)
+- `OPENF1_REPLAY_AUTOWARM_INTERVAL_MS` (default: `2500`)
+
+Note: `duckdb` CLI must be installed in the runtime image for this cache to be active.
+
+Autowarm behavior:
+
+- While replay is active, the server continuously preloads upcoming chunks into the DuckDB cache.
+- This reduces OpenF1 calls during scrubbing and high-speed replay after the first pass.
 
 ## Simulate MQTT (No Live Race Required)
 
