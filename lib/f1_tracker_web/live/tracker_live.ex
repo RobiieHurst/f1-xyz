@@ -504,6 +504,7 @@ defmodule F1TrackerWeb.TrackerLive do
        Map.merge(loc, %{
          code: driver[:code] || to_string(driver_num),
          team_colour: driver[:team_colour] || "FFFFFF",
+         headshot_url: driver[:headshot_url],
          drs_active: driver_drs[:active] || false,
          drs_eligible: driver_drs[:eligible] || false,
          speed: driver_drs[:speed],

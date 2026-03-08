@@ -86,6 +86,7 @@ const TrackMap = {
 
     this.trackFeature = null;
     this.carFeatures = new globalThis.Map();
+    this.avatarCache = new globalThis.Map();
     this.hasFitView = false;
     this.userMovedMap = false;
     this.followDriver = null;
@@ -271,14 +272,39 @@ const TrackMap = {
       this.resetView();
     };
 
-    const controlsRoot = this.el.parentElement || this.el;
-    this._zoomInBtn = controlsRoot.querySelector("[data-map-zoom-in]");
-    this._zoomOutBtn = controlsRoot.querySelector("[data-map-zoom-out]");
-    this._zoomInHandler = () => this.zoomByFactor(1.2);
-    this._zoomOutHandler = () => this.zoomByFactor(0.84);
+    this._zoomInBtn = this.el.querySelector("[data-map-zoom-in]");
+    this._zoomOutBtn = this.el.querySelector("[data-map-zoom-out]");
+    this._zoomInHandler = (event) => {
+      event.preventDefault();
+      this.zoomByFactor(1.2);
+    };
+    this._zoomOutHandler = (event) => {
+      event.preventDefault();
+      this.zoomByFactor(0.84);
+    };
 
     this._zoomInBtn?.addEventListener("click", this._zoomInHandler);
     this._zoomOutBtn?.addEventListener("click", this._zoomOutHandler);
+
+    this._spacePauseHandler = (event) => {
+      const isSpace = event.code === "Space" || event.key === " ";
+      if (!isSpace || event.repeat) return;
+
+      const target = event.target;
+      const editable =
+        target instanceof HTMLElement &&
+          (target.tagName === "INPUT" ||
+            target.tagName === "TEXTAREA" ||
+            target.isContentEditable) ||
+        false;
+
+      if (editable) return;
+
+      event.preventDefault();
+      this.pushEvent("replay_toggle_pause", {});
+    };
+
+    window.addEventListener("keydown", this._spacePauseHandler);
 
     canvas.addEventListener("wheel", this._wheelHandler, { passive: false });
     canvas.addEventListener("pointerdown", this._pointerDownHandler);
@@ -558,6 +584,7 @@ const TrackMap = {
           startTime: now,
           code: loc.code || driverNum,
           team_colour: loc.team_colour || "FFFFFF",
+          headshot_url: loc.headshot_url || null,
           drs_active: loc.drs_active || false,
           position: loc.position || null,
         };
@@ -583,6 +610,7 @@ const TrackMap = {
         existing.startTime = now;
         existing.code = loc.code || existing.code;
         existing.team_colour = loc.team_colour || existing.team_colour;
+        existing.headshot_url = loc.headshot_url || existing.headshot_url;
         existing.drs_active = loc.drs_active || false;
         existing.position = loc.position ?? existing.position;
       }
@@ -613,6 +641,32 @@ const TrackMap = {
       seen.add(event.id);
       return true;
     });
+  },
+
+  getAvatarImage(url) {
+    if (!url || typeof url !== "string") return null;
+
+    let entry = this.avatarCache.get(url);
+
+    if (!entry) {
+      const image = new Image();
+      entry = { status: "loading", image };
+      this.avatarCache.set(url, entry);
+
+      image.crossOrigin = "anonymous";
+      image.onload = () => {
+        const current = this.avatarCache.get(url);
+        if (current) current.status = "loaded";
+      };
+      image.onerror = () => {
+        const current = this.avatarCache.get(url);
+        if (current) current.status = "error";
+      };
+      image.src = url;
+    }
+
+    if (entry.status === "loaded") return entry.image;
+    return null;
   },
 
   pruneTrackEvents(now) {
@@ -910,10 +964,28 @@ const TrackMap = {
       const px = transformed.x;
       const py = transformed.y;
 
-      ctx.beginPath();
-      ctx.arc(px, py, Math.max(3, 5 * this.viewZoom), 0, Math.PI * 2);
-      ctx.fillStyle = `#${car.team_colour}`;
-      ctx.fill();
+      const avatarRadius = Math.max(5, 8 * this.viewZoom);
+      const avatarImage = this.getAvatarImage(car.headshot_url);
+
+      if (avatarImage) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(px, py, avatarRadius, 0, Math.PI * 2);
+        ctx.clip();
+        ctx.drawImage(avatarImage, px - avatarRadius, py - avatarRadius, avatarRadius * 2, avatarRadius * 2);
+        ctx.restore();
+
+        ctx.beginPath();
+        ctx.arc(px, py, avatarRadius, 0, Math.PI * 2);
+        ctx.strokeStyle = `#${car.team_colour}`;
+        ctx.lineWidth = Math.max(1.5, 2.2 * this.viewZoom);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.arc(px, py, Math.max(3, 5 * this.viewZoom), 0, Math.PI * 2);
+        ctx.fillStyle = `#${car.team_colour}`;
+        ctx.fill();
+      }
 
       const label = car.position ? `P${car.position} ${car.code}` : car.code;
       ctx.fillStyle = "rgba(255,255,255,0.95)";
@@ -1015,6 +1087,10 @@ const TrackMap = {
 
     if (this._zoomOutBtn && this._zoomOutHandler) {
       this._zoomOutBtn.removeEventListener("click", this._zoomOutHandler);
+    }
+
+    if (this._spacePauseHandler) {
+      window.removeEventListener("keydown", this._spacePauseHandler);
     }
 
     if (this.olMap) {

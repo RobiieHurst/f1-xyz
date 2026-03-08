@@ -145,6 +145,8 @@ defmodule F1Tracker.F1.ReplayServer do
         current_car_chunk: [],
         next_chunk: nil,
         next_car_chunk: nil,
+        prefetch_in_flight: false,
+        prefetch_start: nil,
         chunk_start: nil,
         chunk_end: nil
     }
@@ -310,6 +312,8 @@ defmodule F1Tracker.F1.ReplayServer do
         chunk_end: chunk_end,
         next_chunk: nil,
         next_car_chunk: nil,
+        prefetch_in_flight: false,
+        prefetch_start: nil,
         has_track_outline: state.has_track_outline or chunk_outline != [],
         track_outline: if(chunk_outline != [], do: chunk_outline, else: state.track_outline)
     }
@@ -328,9 +332,23 @@ defmodule F1Tracker.F1.ReplayServer do
   end
 
   @impl true
-  def handle_info({:prefetched_chunk, chunk_data, car_chunk_data, chunk_start, chunk_end}, state) do
-    {:noreply,
-     %{state | next_chunk: {chunk_data, chunk_start, chunk_end}, next_car_chunk: car_chunk_data}}
+  def handle_info(
+        {:prefetched_chunk, sk, chunk_data, car_chunk_data, chunk_start, chunk_end},
+        state
+      ) do
+    # Ignore stale prefetch responses (e.g., after seeks/session changes).
+    if state.active and state.session_key == sk and state.prefetch_start == chunk_start do
+      {:noreply,
+       %{
+         state
+         | next_chunk: {chunk_data, chunk_start, chunk_end},
+           next_car_chunk: car_chunk_data,
+           prefetch_in_flight: false,
+           prefetch_start: nil
+       }}
+    else
+      {:noreply, %{state | prefetch_in_flight: false, prefetch_start: nil}}
+    end
   end
 
   # -- Replay Tick --
@@ -542,7 +560,9 @@ defmodule F1Tracker.F1.ReplayServer do
             chunk_start: start,
             chunk_end: end_dt,
             next_chunk: nil,
-            next_car_chunk: nil
+            next_car_chunk: nil,
+            prefetch_in_flight: false,
+            prefetch_start: nil
         }
         |> maybe_prefetch(cursor)
 
@@ -553,7 +573,7 @@ defmodule F1Tracker.F1.ReplayServer do
   end
 
   defp maybe_prefetch(state, cursor) do
-    if state.chunk_end && state.next_chunk == nil do
+    if state.chunk_end && state.next_chunk == nil && not state.prefetch_in_flight do
       seconds_to_end = DateTime.diff(state.chunk_end, cursor, :second)
 
       if seconds_to_end <= @prefetch_threshold_seconds do
@@ -576,10 +596,10 @@ defmodule F1Tracker.F1.ReplayServer do
     Task.start(fn ->
       data = fetch_location_chunk(sk, next_start, next_end)
       car_data = fetch_car_data_chunk(sk, next_start, next_end)
-      send(parent, {:prefetched_chunk, data, car_data, next_start, next_end})
+      send(parent, {:prefetched_chunk, sk, data, car_data, next_start, next_end})
     end)
 
-    state
+    %{state | prefetch_in_flight: true, prefetch_start: next_start}
   end
 
   defp fetch_location_chunk(session_key, from_dt, to_dt) do
@@ -911,6 +931,8 @@ defmodule F1Tracker.F1.ReplayServer do
       current_car_chunk: [],
       next_chunk: nil,
       next_car_chunk: nil,
+      prefetch_in_flight: false,
+      prefetch_start: nil,
       chunk_start: nil,
       chunk_end: nil,
       tick_ref: nil,

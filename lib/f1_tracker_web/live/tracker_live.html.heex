@@ -150,27 +150,27 @@
           class="w-full h-full rounded-none lg:rounded-r-2xl overflow-hidden"
         >
           <div id="map-container" class="w-full h-full"></div>
-        </div>
 
-        <div class="absolute left-3 top-3 z-20 flex flex-col gap-2">
-          <button
-            type="button"
-            data-map-zoom-in
-            class="f1-map-control"
-            title="Zoom in"
-            aria-label="Zoom in"
-          >
-            <.icon name="hero-plus" class="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            data-map-zoom-out
-            class="f1-map-control"
-            title="Zoom out"
-            aria-label="Zoom out"
-          >
-            <.icon name="hero-minus" class="w-4 h-4" />
-          </button>
+          <div class="absolute left-3 top-3 z-20 flex flex-col gap-2 pointer-events-auto">
+            <button
+              type="button"
+              data-map-zoom-in
+              class="f1-map-control"
+              title="Zoom in"
+              aria-label="Zoom in"
+            >
+              <.icon name="hero-plus" class="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              data-map-zoom-out
+              class="f1-map-control"
+              title="Zoom out"
+              aria-label="Zoom out"
+            >
+              <.icon name="hero-minus" class="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         <%= if @loading do %>
