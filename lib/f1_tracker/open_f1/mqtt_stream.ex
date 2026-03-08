@@ -34,6 +34,10 @@ defmodule F1Tracker.OpenF1.MQTTStream do
     GenServer.call(__MODULE__, :connected?)
   end
 
+  def available? do
+    Code.ensure_loaded?(:emqtt)
+  end
+
   @impl true
   def init(_opts) do
     {:ok,
@@ -53,10 +57,15 @@ defmodule F1Tracker.OpenF1.MQTTStream do
 
   @impl true
   def handle_cast({:start_stream, session_key}, state) do
-    state = cancel_reconnect(state)
-    state = cancel_flush(state)
-    state = disconnect_client(state)
-    {:noreply, connect(state, session_key)}
+    if not available?() do
+      Logger.warning("MQTT stream unavailable: :emqtt not compiled for this build")
+      {:noreply, %{state | session_key: session_key, connected: false}}
+    else
+      state = cancel_reconnect(state)
+      state = cancel_flush(state)
+      state = disconnect_client(state)
+      {:noreply, connect(state, session_key)}
+    end
   end
 
   @impl true
@@ -127,37 +136,47 @@ defmodule F1Tracker.OpenF1.MQTTStream do
   defp connect(state, nil), do: state
 
   defp connect(state, session_key) do
-    case TokenManager.get_token() do
-      token when is_binary(token) and token != "" ->
-        client_id = "f1_tracker_#{session_key}_#{System.unique_integer([:positive])}"
+    if not available?() do
+      %{state | session_key: session_key, connected: false}
+    else
+      case TokenManager.get_token() do
+        token when is_binary(token) and token != "" ->
+          client_id = "f1_tracker_#{session_key}_#{System.unique_integer([:positive])}"
 
-        opts = [
-          {:host, @host},
-          {:port, @port},
-          {:ssl, true},
-          {:ssl_opts, [{:verify, :verify_none}]},
-          {:clientid, String.to_charlist(client_id)},
-          {:username, ~c"f1_tracker"},
-          {:password, String.to_charlist(token)},
-          {:clean_start, true},
-          {:keepalive, 60}
-        ]
+          opts = [
+            {:host, @host},
+            {:port, @port},
+            {:ssl, true},
+            {:ssl_opts, [{:verify, :verify_none}]},
+            {:clientid, String.to_charlist(client_id)},
+            {:username, ~c"f1_tracker"},
+            {:password, String.to_charlist(token)},
+            {:clean_start, true},
+            {:keepalive, 60}
+          ]
 
-        with {:ok, client} <- :emqtt.start_link(opts),
-             {:ok, _props} <- :emqtt.connect(client),
-             {:ok, _, _} <- :emqtt.subscribe(client, [{"v1/location", 0}, {"v1/car_data", 0}]) do
-          Process.monitor(client)
-          Logger.info("MQTT stream connected for session #{session_key}")
-          %{state | client: client, session_key: session_key, connected: true}
-        else
-          error ->
-            Logger.warning("MQTT stream connect failed: #{inspect(error)}")
-            schedule_reconnect(%{state | client: nil, session_key: session_key, connected: false})
-        end
+          with {:ok, client} <- :emqtt.start_link(opts),
+               {:ok, _props} <- :emqtt.connect(client),
+               {:ok, _, _} <- :emqtt.subscribe(client, [{"v1/location", 0}, {"v1/car_data", 0}]) do
+            Process.monitor(client)
+            Logger.info("MQTT stream connected for session #{session_key}")
+            %{state | client: client, session_key: session_key, connected: true}
+          else
+            error ->
+              Logger.warning("MQTT stream connect failed: #{inspect(error)}")
 
-      _ ->
-        Logger.warning("MQTT stream skipped: no OpenF1 token available")
-        %{state | session_key: session_key, connected: false}
+              schedule_reconnect(%{
+                state
+                | client: nil,
+                  session_key: session_key,
+                  connected: false
+              })
+          end
+
+        _ ->
+          Logger.warning("MQTT stream skipped: no OpenF1 token available")
+          %{state | session_key: session_key, connected: false}
+      end
     end
   end
 
@@ -258,12 +277,16 @@ defmodule F1Tracker.OpenF1.MQTTStream do
   defp int_value(_), do: nil
 
   defp safe_disconnect(client) do
-    try do
-      _ = :emqtt.disconnect(client)
-      _ = :emqtt.stop(client)
+    if not available?() do
       :ok
-    catch
-      :exit, _ -> :ok
+    else
+      try do
+        _ = :emqtt.disconnect(client)
+        _ = :emqtt.stop(client)
+        :ok
+      catch
+        :exit, _ -> :ok
+      end
     end
   end
 end

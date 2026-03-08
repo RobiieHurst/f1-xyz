@@ -995,8 +995,12 @@ defmodule F1Tracker.F1.SessionServer do
   end
 
   defp maybe_start_mqtt_stream(session_key) when is_integer(session_key) do
-    MQTTStream.start_stream(session_key)
-    true
+    if MQTTStream.available?() do
+      MQTTStream.start_stream(session_key)
+      true
+    else
+      false
+    end
   end
 
   defp maybe_start_mqtt_stream(_), do: false
