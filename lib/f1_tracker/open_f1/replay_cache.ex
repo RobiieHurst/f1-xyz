@@ -120,45 +120,35 @@ defmodule F1Tracker.OpenF1.ReplayCache do
   def handle_cast({:put, endpoint, session_key, from_iso, to_iso, payload}, state) do
     from_key = normalize_iso_key(from_iso)
     to_key = normalize_iso_key(to_iso)
-    _ = store_chunk(state, endpoint, session_key, from_key, to_key, payload)
+    result = store_chunk(state, endpoint, session_key, from_key, to_key, payload)
 
-    Logger.info(
-      "ReplayCache STORE endpoint=#{endpoint} session=#{session_key} range=#{from_iso}..#{to_iso} rows=#{length(payload)}"
-    )
+    case result do
+      {:ok, rows} ->
+        Logger.info(
+          "ReplayCache STORE endpoint=#{endpoint} session=#{session_key} range=#{from_iso}..#{to_iso} rows=#{rows}"
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "ReplayCache STORE_FAILED endpoint=#{endpoint} session=#{session_key} range=#{from_iso}..#{to_iso} reason=#{inspect(reason)}"
+        )
+    end
 
     {:noreply, state}
   end
 
   defp fetch_chunk(state, endpoint, session_key, from_iso, to_iso) do
-    out_path = Path.join(state.tmp_dir, "get_#{System.unique_integer([:positive])}.json")
-
     sql =
-      """
-      COPY (
-        SELECT payload_json
-        FROM #{@table}
-        WHERE endpoint = '#{esc(endpoint)}'
-          AND session_key = #{session_key}
-          AND from_iso = '#{esc(from_iso)}'
-          AND to_iso = '#{esc(to_iso)}'
-        LIMIT 1
-      ) TO '#{esc(out_path)}' (FORMAT JSON);
-      """
+      "SELECT payload_json FROM #{@table} WHERE endpoint = '#{esc(endpoint)}' AND session_key = #{session_key} AND from_iso = '#{esc(from_iso)}' AND to_iso = '#{esc(to_iso)}' LIMIT 1;"
 
-    result =
-      with :ok <- ensure_schema(state),
-           {:ok, _} <- run_sql(state, sql),
-           {:ok, body} <- File.read(out_path),
-           {:ok, rows} <- Jason.decode(body),
-           [%{"payload_json" => payload_json} | _] <- rows,
-           {:ok, payload} <- Jason.decode(payload_json) do
-        {:ok, payload}
-      else
-        _ -> :miss
-      end
-
-    _ = File.rm(out_path)
-    result
+    with :ok <- ensure_schema(state),
+         {:ok, rows} <- run_query_json(state, sql),
+         [%{"payload_json" => payload_json} | _] <- rows,
+         {:ok, payload} <- Jason.decode(payload_json) do
+      {:ok, payload}
+    else
+      _ -> :miss
+    end
   end
 
   defp store_chunk(state, endpoint, session_key, from_iso, to_iso, payload) do
@@ -181,11 +171,9 @@ defmodule F1Tracker.OpenF1.ReplayCache do
          :ok <- ensure_schema(state),
          {:ok, _} <- run_sql(state, upsert_sql(row_path, endpoint, session_key, from_iso, to_iso)),
          {:ok, _} <- run_sql(state, export_parquet_sql(state.parquet_dir, endpoint, session_key)) do
-      :ok
+      {:ok, length(payload)}
     else
-      error ->
-        Logger.warning("ReplayCache store failed: #{inspect(error)}")
-        :ok
+      error -> {:error, error}
     end
     |> then(fn result ->
       _ = File.rm(row_path)
@@ -246,6 +234,21 @@ defmodule F1Tracker.OpenF1.ReplayCache do
     case System.cmd(state.duckdb, [state.db_path, sql], stderr_to_stdout: true) do
       {output, 0} -> {:ok, output}
       {output, status} -> {:error, {:duckdb_sql_failed, status, output}}
+    end
+  end
+
+  defp run_query_json(%{duckdb: nil}, _sql), do: {:error, :duckdb_missing}
+
+  defp run_query_json(state, sql) do
+    case System.cmd(state.duckdb, ["-json", state.db_path, sql], stderr_to_stdout: true) do
+      {output, 0} ->
+        case Jason.decode(output) do
+          {:ok, rows} when is_list(rows) -> {:ok, rows}
+          other -> {:error, {:invalid_json_result, other, output}}
+        end
+
+      {output, status} ->
+        {:error, {:duckdb_query_failed, status, output}}
     end
   end
 
