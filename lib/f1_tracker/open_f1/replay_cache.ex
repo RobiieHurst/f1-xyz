@@ -88,7 +88,9 @@ defmodule F1Tracker.OpenF1.ReplayCache do
 
   @impl true
   def handle_call({:get, endpoint, session_key, from_iso, to_iso}, _from, state) do
-    reply = fetch_chunk(state, endpoint, session_key, from_iso, to_iso)
+    from_key = normalize_iso_key(from_iso)
+    to_key = normalize_iso_key(to_iso)
+    reply = fetch_chunk(state, endpoint, session_key, from_key, to_key)
 
     case reply do
       {:ok, payload} ->
@@ -116,7 +118,9 @@ defmodule F1Tracker.OpenF1.ReplayCache do
 
   @impl true
   def handle_cast({:put, endpoint, session_key, from_iso, to_iso, payload}, state) do
-    _ = store_chunk(state, endpoint, session_key, from_iso, to_iso, payload)
+    from_key = normalize_iso_key(from_iso)
+    to_key = normalize_iso_key(to_iso)
+    _ = store_chunk(state, endpoint, session_key, from_key, to_key, payload)
 
     Logger.info(
       "ReplayCache STORE endpoint=#{endpoint} session=#{session_key} range=#{from_iso}..#{to_iso} rows=#{length(payload)}"
@@ -247,4 +251,13 @@ defmodule F1Tracker.OpenF1.ReplayCache do
 
   defp esc(value) when is_binary(value), do: String.replace(value, "'", "''")
   defp esc(value), do: value |> to_string() |> esc()
+
+  defp normalize_iso_key(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _offset} -> Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
+      _ -> value
+    end
+  end
+
+  defp normalize_iso_key(value), do: value
 end
