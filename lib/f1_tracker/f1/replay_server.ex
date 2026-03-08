@@ -53,6 +53,11 @@ defmodule F1Tracker.F1.ReplayServer do
     GenServer.cast(__MODULE__, {:seek, ratio})
   end
 
+  @doc "Seek replay cursor by signed seconds"
+  def seek_by(seconds) when is_integer(seconds) and seconds != 0 do
+    GenServer.cast(__MODULE__, {:seek_by, seconds})
+  end
+
   @doc "Stop replay"
   def stop_replay do
     GenServer.cast(__MODULE__, :stop_replay)
@@ -160,6 +165,44 @@ defmodule F1Tracker.F1.ReplayServer do
     broadcast_replay_state(new_state)
     {:noreply, new_state}
   end
+
+  @impl true
+  def handle_cast({:seek_by, seconds}, %{active: true, replay_cursor: cursor} = state)
+      when is_struct(cursor, DateTime) do
+    target_ts =
+      cursor
+      |> DateTime.add(seconds, :second)
+      |> clamp_datetime(state.session_start, state.session_end)
+
+    if DateTime.compare(target_ts, cursor) == :eq do
+      {:noreply, state}
+    else
+      if state.tick_ref, do: Process.cancel_timer(state.tick_ref)
+
+      new_state = %{
+        state
+        | replay_cursor: target_ts,
+          wall_start: System.monotonic_time(:millisecond),
+          tick_ref: nil,
+          current_chunk: [],
+          current_car_chunk: [],
+          next_chunk: nil,
+          next_car_chunk: nil,
+          prefetch_in_flight: false,
+          prefetch_start: nil,
+          chunk_start: nil,
+          chunk_end: nil
+      }
+
+      send(self(), {:fetch_chunk, target_ts})
+      broadcast("race_control:update", race_control_up_to_cursor(state.race_control, target_ts))
+      broadcast_replay_state(new_state)
+      {:noreply, new_state}
+    end
+  end
+
+  @impl true
+  def handle_cast({:seek_by, _seconds}, state), do: {:noreply, state}
 
   @impl true
   def handle_cast({:seek, _ratio}, state), do: {:noreply, state}
@@ -970,6 +1013,14 @@ defmodule F1Tracker.F1.ReplayServer do
     total_seconds = DateTime.diff(end_dt, start_dt, :second)
     offset = trunc(total_seconds * ratio)
     DateTime.add(start_dt, offset, :second)
+  end
+
+  defp clamp_datetime(dt, min_dt, max_dt) do
+    cond do
+      DateTime.compare(dt, min_dt) == :lt -> min_dt
+      DateTime.compare(dt, max_dt) == :gt -> max_dt
+      true -> dt
+    end
   end
 
   defp parse_dt!(date_str) do

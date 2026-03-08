@@ -1,4 +1,6 @@
-const LERP_DURATION_MS = 500;
+const DEFAULT_LERP_MS = 500;
+const MIN_LERP_MS = 120;
+const MAX_LERP_MS = 1600;
 const TELEPORT_THRESHOLD = 5000;
 const MAX_LABEL_DISTANCE = 20000;
 const TRACK_EVENT_TTL_MS = 10000;
@@ -582,6 +584,8 @@ const TrackMap = {
           target: { x: loc.x, y: loc.y },
           current: { x: loc.x, y: loc.y },
           startTime: now,
+          lastUpdateAt: now,
+          lerpMs: DEFAULT_LERP_MS,
           code: loc.code || driverNum,
           team_colour: loc.team_colour || "FFFFFF",
           headshot_url: loc.headshot_url || null,
@@ -602,12 +606,18 @@ const TrackMap = {
           existing.prev = { x: loc.x, y: loc.y };
           existing.target = { x: loc.x, y: loc.y };
           existing.current = { x: loc.x, y: loc.y };
+          existing.lerpMs = MIN_LERP_MS;
         } else {
+          const updateGap = Math.max(1, now - (existing.lastUpdateAt || now));
+          // Follow real update cadence: long polling intervals get longer blend,
+          // high-frequency MQTT updates stay snappy.
+          existing.lerpMs = Math.max(MIN_LERP_MS, Math.min(MAX_LERP_MS, updateGap * 0.9));
           existing.prev = { x: existing.current.x, y: existing.current.y };
           existing.target = { x: loc.x, y: loc.y };
         }
 
         existing.startTime = now;
+        existing.lastUpdateAt = now;
         existing.code = loc.code || existing.code;
         existing.team_colour = loc.team_colour || existing.team_colour;
         existing.headshot_url = loc.headshot_url || existing.headshot_url;
@@ -802,7 +812,8 @@ const TrackMap = {
 
     for (const [, car] of Object.entries(this.carStates)) {
       const elapsed = now - car.startTime;
-      const t = Math.min(elapsed / LERP_DURATION_MS, 1);
+      const lerpMs = Number.isFinite(car.lerpMs) ? car.lerpMs : DEFAULT_LERP_MS;
+      const t = Math.min(elapsed / lerpMs, 1);
       const ease = 1 - Math.pow(1 - t, 3);
       car.current = {
         x: car.prev.x + (car.target.x - car.prev.x) * ease,

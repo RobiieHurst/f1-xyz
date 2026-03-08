@@ -1,4 +1,4 @@
-<div class="f1-shell min-h-screen text-slate-100">
+<div class="f1-shell min-h-screen text-slate-100" phx-window-keydown="replay_shortcut">
   <!-- Header -->
   <header class="f1-topbar px-3 sm:px-6 py-3 flex items-center justify-between">
     <div class="flex items-center gap-2 sm:gap-3">
@@ -274,6 +274,15 @@
                 <% end %>
               </button>
 
+              <button
+                phx-click="replay_nudge"
+                phx-value-seconds="-5"
+                class="hidden sm:inline-flex px-2 py-1 text-[10px] font-mono rounded bg-slate-800 text-slate-200 hover:bg-slate-700"
+                title="Back 5 seconds (Left Arrow)"
+              >
+                -5s
+              </button>
+
               <%!-- Progress bar / scrubber --%>
               <div class="flex-1 min-w-0">
                 <form phx-change="replay_seek" id="replay-seek-form">
@@ -294,6 +303,15 @@
               <div class="text-xs text-slate-300 font-mono flex-shrink-0 hidden sm:block">
                 {format_replay_cursor(@replay_cursor)}
               </div>
+
+              <button
+                phx-click="replay_nudge"
+                phx-value-seconds="5"
+                class="hidden sm:inline-flex px-2 py-1 text-[10px] font-mono rounded bg-slate-800 text-slate-200 hover:bg-slate-700"
+                title="Forward 5 seconds (Right Arrow)"
+              >
+                +5s
+              </button>
 
               <%!-- Speed selector --%>
               <div class="flex items-center gap-1 flex-shrink-0">

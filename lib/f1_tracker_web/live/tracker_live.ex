@@ -202,6 +202,42 @@ defmodule F1TrackerWeb.TrackerLive do
      |> assign(:replay_seek_pending, ratio)}
   end
 
+  @impl true
+  def handle_event("replay_nudge", %{"seconds" => seconds}, socket) do
+    if socket.assigns.replay_active do
+      F1Tracker.F1.ReplayServer.seek_by(String.to_integer(seconds))
+    end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("replay_shortcut", %{"key" => key, "repeat" => "true"}, socket)
+      when key in ["ArrowLeft", "ArrowRight"] do
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("replay_shortcut", %{"key" => "ArrowLeft"}, socket) do
+    if socket.assigns.replay_active do
+      F1Tracker.F1.ReplayServer.seek_by(-5)
+    end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("replay_shortcut", %{"key" => "ArrowRight"}, socket) do
+    if socket.assigns.replay_active do
+      F1Tracker.F1.ReplayServer.seek_by(5)
+    end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("replay_shortcut", _params, socket), do: {:noreply, socket}
+
   # -- PubSub Handlers --
 
   @impl true
