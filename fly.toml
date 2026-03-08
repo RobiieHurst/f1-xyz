@@ -26,9 +26,10 @@ kill_signal = 'SIGTERM'
     hard_limit = 1000
     soft_limit = 1000
 
-[mounts]
+[[mounts]]
   source = "f1_cache"
   destination = "/data"
+  processes = ["app"]
 
 [[vm]]
   memory = '1gb'
