@@ -142,6 +142,7 @@ defmodule F1Tracker.F1.ReplayServer do
   @impl true
   def handle_cast({:seek, ratio}, %{active: true} = state) do
     target_ts = interpolate_timestamp(state.session_start, state.session_end, ratio)
+    fetch_from = chunk_start_for_cursor(target_ts, state.session_start)
 
     # Cancel current tick
     if state.tick_ref, do: Process.cancel_timer(state.tick_ref)
@@ -161,8 +162,8 @@ defmodule F1Tracker.F1.ReplayServer do
         chunk_end: nil
     }
 
-    # Fetch fresh chunk at seek position and resume
-    send(self(), {:fetch_chunk, target_ts})
+    # Fetch aligned chunk for better cache reuse
+    send(self(), {:fetch_chunk, fetch_from})
 
     # Sync race control feed with seek target
     broadcast("race_control:update", race_control_up_to_cursor(state.race_control, target_ts))
@@ -178,6 +179,8 @@ defmodule F1Tracker.F1.ReplayServer do
       cursor
       |> DateTime.add(seconds, :second)
       |> clamp_datetime(state.session_start, state.session_end)
+
+    fetch_from = chunk_start_for_cursor(target_ts, state.session_start)
 
     if DateTime.compare(target_ts, cursor) == :eq do
       {:noreply, state}
@@ -199,7 +202,7 @@ defmodule F1Tracker.F1.ReplayServer do
           chunk_end: nil
       }
 
-      send(self(), {:fetch_chunk, target_ts})
+      send(self(), {:fetch_chunk, fetch_from})
       broadcast("race_control:update", race_control_up_to_cursor(state.race_control, target_ts))
       broadcast_replay_state(new_state)
       {:noreply, new_state}
@@ -327,6 +330,7 @@ defmodule F1Tracker.F1.ReplayServer do
 
   @impl true
   def handle_info({:fetch_chunk, from_dt}, %{session_key: sk} = state) do
+    from_dt = DateTime.truncate(from_dt, :second)
     chunk_end = DateTime.add(from_dt, @chunk_seconds, :second)
 
     Logger.debug(
@@ -1116,6 +1120,12 @@ defmodule F1Tracker.F1.ReplayServer do
     total_seconds = DateTime.diff(end_dt, start_dt, :second)
     offset = trunc(total_seconds * ratio)
     DateTime.add(start_dt, offset, :second)
+  end
+
+  defp chunk_start_for_cursor(cursor, session_start) do
+    seconds_from_start = max(DateTime.diff(cursor, session_start, :second), 0)
+    bucket_seconds = div(seconds_from_start, @chunk_seconds) * @chunk_seconds
+    DateTime.add(session_start, bucket_seconds, :second) |> DateTime.truncate(:second)
   end
 
   defp clamp_datetime(dt, min_dt, max_dt) do
