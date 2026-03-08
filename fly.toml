@@ -27,7 +27,7 @@ kill_signal = 'SIGTERM'
     soft_limit = 1000
 
 [mounts]
-  source = "f1_cache"
+  source = "vol_re86dgjjldnpdj1r"
   destination = "/data"
 
 [[vm]]
