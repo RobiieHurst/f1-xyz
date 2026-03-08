@@ -12,6 +12,7 @@ defmodule F1Tracker.Application do
       {DNSCluster, query: Application.get_env(:f1_tracker, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: F1Tracker.PubSub},
       F1Tracker.OpenF1.TokenManager,
+      F1Tracker.OpenF1.MQTTStream,
       F1Tracker.F1.TrackOutlineCache,
       F1Tracker.F1.SessionServer,
       F1Tracker.F1.ReplayServer,

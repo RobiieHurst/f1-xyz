@@ -238,22 +238,8 @@ const TrackMap = {
       const mouseX = event.clientX - rect.left;
       const mouseY = event.clientY - rect.top;
 
-      const oldZoom = this.viewZoom;
       const zoomFactor = event.deltaY < 0 ? 1.1 : 0.9;
-      const newZoom = Math.max(0.6, Math.min(6, oldZoom * zoomFactor));
-
-      if (newZoom === oldZoom) return;
-
-      const cx = canvas.width / 2;
-      const cy = canvas.height / 2;
-
-      // Keep the point under cursor stable while zooming.
-      this.viewPanX =
-        mouseX - ((mouseX - cx - this.viewPanX) / oldZoom) * newZoom - cx;
-      this.viewPanY =
-        mouseY - ((mouseY - cy - this.viewPanY) / oldZoom) * newZoom - cy;
-
-      this.viewZoom = newZoom;
+      this.zoomAroundPoint(mouseX, mouseY, zoomFactor);
     };
 
     this._pointerDownHandler = (event) => {
@@ -282,10 +268,17 @@ const TrackMap = {
 
     this._dblClickHandler = (event) => {
       event.preventDefault();
-      this.viewZoom = 1;
-      this.viewPanX = 0;
-      this.viewPanY = 0;
+      this.resetView();
     };
+
+    const controlsRoot = this.el.parentElement || this.el;
+    this._zoomInBtn = controlsRoot.querySelector("[data-map-zoom-in]");
+    this._zoomOutBtn = controlsRoot.querySelector("[data-map-zoom-out]");
+    this._zoomInHandler = () => this.zoomByFactor(1.2);
+    this._zoomOutHandler = () => this.zoomByFactor(0.84);
+
+    this._zoomInBtn?.addEventListener("click", this._zoomInHandler);
+    this._zoomOutBtn?.addEventListener("click", this._zoomOutHandler);
 
     canvas.addEventListener("wheel", this._wheelHandler, { passive: false });
     canvas.addEventListener("pointerdown", this._pointerDownHandler);
@@ -304,6 +297,36 @@ const TrackMap = {
     resize();
 
     this.startAnimationLoop();
+  },
+
+  resetView() {
+    this.viewZoom = 1;
+    this.viewPanX = 0;
+    this.viewPanY = 0;
+  },
+
+  zoomByFactor(factor) {
+    if (!this.canvas || !Number.isFinite(factor) || factor <= 0) return;
+
+    const cx = this.canvas.width / 2;
+    const cy = this.canvas.height / 2;
+    this.zoomAroundPoint(cx, cy, factor);
+  },
+
+  zoomAroundPoint(pointX, pointY, factor) {
+    if (!this.canvas) return;
+
+    const oldZoom = this.viewZoom;
+    const newZoom = Math.max(0.6, Math.min(6, oldZoom * factor));
+
+    if (newZoom === oldZoom) return;
+
+    const cx = this.canvas.width / 2;
+    const cy = this.canvas.height / 2;
+
+    this.viewPanX = pointX - ((pointX - cx - this.viewPanX) / oldZoom) * newZoom - cx;
+    this.viewPanY = pointY - ((pointY - cy - this.viewPanY) / oldZoom) * newZoom - cy;
+    this.viewZoom = newZoom;
   },
 
   updateHud() {
@@ -984,6 +1007,14 @@ const TrackMap = {
         this.canvas.removeEventListener("pointercancel", this._pointerUpHandler);
       }
       if (this._dblClickHandler) this.canvas.removeEventListener("dblclick", this._dblClickHandler);
+    }
+
+    if (this._zoomInBtn && this._zoomInHandler) {
+      this._zoomInBtn.removeEventListener("click", this._zoomInHandler);
+    }
+
+    if (this._zoomOutBtn && this._zoomOutHandler) {
+      this._zoomOutBtn.removeEventListener("click", this._zoomOutHandler);
     }
 
     if (this.olMap) {

@@ -47,6 +47,9 @@ defmodule F1TrackerWeb.TrackerLive do
       |> assign(:replay_loading, false)
       |> assign(:previous_positions, %{})
       |> assign(:selected_driver, nil)
+      |> assign(:replay_seek_timer, nil)
+      |> assign(:replay_seek_pending, nil)
+      |> assign(:replay_seek_last_sent, nil)
 
     {:ok, socket}
   end
@@ -109,6 +112,10 @@ defmodule F1TrackerWeb.TrackerLive do
 
   @impl true
   def handle_event("stop_tracking", _params, socket) do
+    if socket.assigns.replay_seek_timer,
+      do: Process.cancel_timer(socket.assigns.replay_seek_timer)
+
+    SessionServer.set_focus_driver(nil)
     SessionServer.stop_tracking()
     F1Tracker.F1.ReplayServer.stop_replay()
 
@@ -118,7 +125,10 @@ defmodule F1TrackerWeb.TrackerLive do
        replay_active: false,
        replay_paused: false,
        replay_progress: 0.0,
-       selected_driver: nil
+       selected_driver: nil,
+       replay_seek_timer: nil,
+       replay_seek_pending: nil,
+       replay_seek_last_sent: nil
      )
      |> push_event("follow_driver", %{driver_number: nil})}
   end
@@ -138,6 +148,8 @@ defmodule F1TrackerWeb.TrackerLive do
       else
         number
       end
+
+    SessionServer.set_focus_driver(selected_driver)
 
     {:noreply,
      socket
@@ -177,8 +189,17 @@ defmodule F1TrackerWeb.TrackerLive do
   @impl true
   def handle_event("replay_seek", %{"value" => value}, socket) do
     ratio = String.to_float(value)
-    F1Tracker.F1.ReplayServer.seek(ratio)
-    {:noreply, socket}
+
+    if socket.assigns.replay_seek_timer do
+      Process.cancel_timer(socket.assigns.replay_seek_timer)
+    end
+
+    timer = Process.send_after(self(), {:apply_replay_seek, ratio}, 180)
+
+    {:noreply,
+     socket
+     |> assign(:replay_seek_timer, timer)
+     |> assign(:replay_seek_pending, ratio)}
   end
 
   # -- PubSub Handlers --
@@ -188,6 +209,8 @@ defmodule F1TrackerWeb.TrackerLive do
         {"session:started", %{session_key: sk, drivers: drivers, session_meta: session_meta}},
         socket
       ) do
+    SessionServer.set_focus_driver(nil)
+
     {:noreply,
      socket
      |> assign(:selected_session, sk)
@@ -203,6 +226,8 @@ defmodule F1TrackerWeb.TrackerLive do
 
   @impl true
   def handle_info({"session:started", %{session_key: sk, drivers: drivers}}, socket) do
+    SessionServer.set_focus_driver(nil)
+
     {:noreply,
      socket
      |> assign(:selected_session, sk)
@@ -350,6 +375,28 @@ defmodule F1TrackerWeb.TrackerLive do
   end
 
   @impl true
+  def handle_info({:apply_replay_seek, ratio}, socket) do
+    current_pending = socket.assigns.replay_seek_pending
+    last_sent = socket.assigns.replay_seek_last_sent
+
+    should_send =
+      socket.assigns.replay_active and
+        is_float(current_pending) and
+        abs(current_pending - ratio) < 0.0005 and
+        (is_nil(last_sent) or abs(ratio - last_sent) >= 0.001)
+
+    if should_send do
+      F1Tracker.F1.ReplayServer.seek(ratio)
+    end
+
+    {:noreply,
+     socket
+     |> assign(:replay_seek_timer, nil)
+     |> assign(:replay_seek_pending, nil)
+     |> assign(:replay_seek_last_sent, if(should_send, do: ratio, else: last_sent))}
+  end
+
+  @impl true
   def handle_info({"track_outline:update", outline}, socket) do
     {:noreply, push_event(socket, "track_outline", %{points: outline})}
   end
@@ -437,25 +484,25 @@ defmodule F1TrackerWeb.TrackerLive do
       end)
 
     Map.new(locations, fn {driver_num, loc} ->
-      driver = Map.get(drivers, driver_num, %{})
-      driver_drs = Map.get(drs, driver_num, %{})
+      driver = lookup_driver_key(drivers, driver_num) || %{}
+      driver_drs = lookup_driver_key(drs, driver_num) || %{}
 
       # Latest lap data
       latest =
-        case Map.get(timing[:laps] || %{}, driver_num) do
+        case lookup_driver_key(timing[:laps] || %{}, driver_num) do
           nil -> nil
           laps -> latest_valid_lap(laps)
         end
 
       # Interval/gap data
-      interval_data = Map.get(timing[:intervals] || %{}, driver_num, %{})
+      interval_data = lookup_driver_key(timing[:intervals] || %{}, driver_num) || %{}
 
       # Current stint (tyre info)
-      stint = Map.get(timing[:stints] || %{}, driver_num, %{})
+      stint = lookup_driver_key(timing[:stints] || %{}, driver_num) || %{}
 
       {to_string(driver_num),
        Map.merge(loc, %{
-         code: driver[:code] || "???",
+         code: driver[:code] || to_string(driver_num),
          team_colour: driver[:team_colour] || "FFFFFF",
          drs_active: driver_drs[:active] || false,
          drs_eligible: driver_drs[:eligible] || false,
@@ -465,7 +512,7 @@ defmodule F1TrackerWeb.TrackerLive do
          gear: driver_drs[:gear],
          rpm: driver_drs[:rpm],
          # Timing data for map labels
-         position: Map.get(position_lookup, driver_num),
+         position: lookup_driver_key(position_lookup, driver_num),
          last_lap: format_lap_time_short(latest && latest.lap_duration),
          gap: format_gap_short(interval_data[:gap_to_leader]),
          interval: format_gap_short(interval_data[:interval]),
@@ -473,6 +520,23 @@ defmodule F1TrackerWeb.TrackerLive do
        })}
     end)
   end
+
+  defp lookup_driver_key(map, key) when is_map(map) do
+    Map.get(map, key) ||
+      Map.get(map, to_string(key)) ||
+      if is_binary(key), do: Map.get(map, parse_int(key)), else: nil
+  end
+
+  defp lookup_driver_key(_, _), do: nil
+
+  defp parse_int(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {int, ""} -> int
+      _ -> nil
+    end
+  end
+
+  defp parse_int(_), do: nil
 
   defp positions_to_map(positions) do
     Map.new(positions, fn p ->

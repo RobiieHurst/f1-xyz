@@ -1,11 +1,11 @@
-<div class="min-h-screen bg-gray-950 text-white">
+<div class="f1-shell min-h-screen text-slate-100">
   <!-- Header -->
-  <header class="bg-gray-900 border-b border-gray-800 px-3 sm:px-6 py-3 flex items-center justify-between">
+  <header class="f1-topbar px-3 sm:px-6 py-3 flex items-center justify-between">
     <div class="flex items-center gap-2 sm:gap-3">
-      <h1 class="text-lg sm:text-xl font-bold text-red-500">F1 Tracker</h1>
+      <h1 class="text-lg sm:text-xl font-semibold tracking-wide text-rose-300">F1 Tracker</h1>
       <%= if @tracking do %>
-        <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs bg-green-900 text-green-300">
-          <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span> LIVE
+        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs border border-emerald-400/30 bg-emerald-500/15 text-emerald-200">
+          <span class="w-2 h-2 rounded-full bg-emerald-300 animate-pulse"></span> LIVE
         </span>
       <% end %>
     </div>
@@ -13,12 +13,12 @@
     <div class="flex items-center gap-2 sm:gap-3">
       <!-- Weather: icons only on mobile, full text on desktop -->
       <%= if @weather do %>
-        <div class="hidden sm:flex text-sm text-gray-400 gap-2">
+        <div class="hidden sm:flex text-sm text-slate-300/90 gap-2">
           <span>{@weather["air_temperature"]}°C</span>
           <span>{@weather["wind_speed"]} km/h</span>
           <span>{@weather["humidity"]}%</span>
         </div>
-        <div class="flex sm:hidden text-xs text-gray-400 gap-1.5">
+        <div class="flex sm:hidden text-xs text-slate-300/90 gap-1.5">
           <span>{@weather["air_temperature"]}°</span>
           <span>{@weather["humidity"]}%</span>
         </div>
@@ -28,21 +28,21 @@
         <!-- Mobile timing toggle -->
         <button
           phx-click="toggle_timing"
-          class="lg:hidden px-2.5 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
+          class="f1-btn f1-btn-ghost lg:hidden px-2.5 py-1.5 text-sm"
           title="Toggle timing tower"
         >
           <.icon name="hero-bars-3" class="w-4 h-4" />
         </button>
         <button
           phx-click="stop_tracking"
-          class="px-3 py-1.5 text-sm bg-red-700 hover:bg-red-600 rounded"
+          class="f1-btn f1-btn-danger px-3 py-1.5 text-sm"
         >
           Stop
         </button>
       <% else %>
         <button
           phx-click="load_sessions"
-          class="px-3 py-1.5 text-sm bg-blue-700 hover:bg-blue-600 rounded"
+          class="f1-btn f1-btn-primary px-3 py-1.5 text-sm"
         >
           Load Sessions
         </button>
@@ -54,16 +54,18 @@
     <!-- Session Picker -->
     <%= if !@tracking and @all_sessions != [] do %>
       <%!-- Mobile: full-width overlay / Desktop: sidebar --%>
-      <aside class="w-full lg:w-80 bg-gray-900 border-r border-gray-800 flex flex-col max-h-[50vh] lg:max-h-full">
+      <aside class="f1-panel w-full lg:w-80 flex flex-col max-h-[50vh] lg:max-h-full">
         <!-- Search & Filters (sticky) -->
-        <div class="bg-gray-900 border-b border-gray-800 p-3 sm:p-4 space-y-2 sm:space-y-3 flex-shrink-0">
-          <h2 class="text-sm font-semibold text-gray-400 uppercase">Sessions</h2>
+        <div class="border-b border-white/10 p-3 sm:p-4 space-y-2 sm:space-y-3 flex-shrink-0">
+          <h2 class="text-sm font-semibold tracking-[0.12em] text-slate-300 uppercase">
+            Sessions
+          </h2>
           
 <!-- Search -->
           <div class="relative">
             <.icon
               name="hero-magnifying-glass"
-              class="w-4 h-4 absolute left-2.5 top-2.5 text-gray-500"
+              class="w-4 h-4 absolute left-2.5 top-2.5 text-slate-500"
             />
             <input
               type="text"
@@ -72,7 +74,7 @@
               phx-debounce="200"
               placeholder="Search circuit or country..."
               value={@filter_search}
-              class="w-full bg-gray-800 border border-gray-700 rounded-lg pl-8 pr-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-1 focus:ring-red-500 focus:border-red-500"
+              class="w-full bg-slate-900/70 border border-white/10 rounded-lg pl-8 pr-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-rose-400/70 focus:border-rose-400/70"
             />
           </div>
           
@@ -86,7 +88,8 @@
                   "px-2.5 py-1 text-xs rounded-full transition-colors",
                   if(@filter_type == type,
                     do: "bg-red-600 text-white",
-                    else: "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-300"
+                    else:
+                      "bg-slate-900/70 text-slate-300 hover:bg-slate-800/80 hover:text-slate-100"
                   )
                 ]}
               >
@@ -95,7 +98,7 @@
             <% end %>
           </div>
 
-          <div class="text-xs text-gray-500">
+          <div class="text-xs text-slate-400/80">
             {length(@sessions)} session(s) found
           </div>
         </div>
@@ -103,8 +106,8 @@
 <!-- Session list (scrollable) -->
         <div class="flex-1 overflow-y-auto p-3 sm:p-4 space-y-2">
           <%= if @sessions == [] do %>
-            <div class="text-center py-8 text-gray-500">
-              <.icon name="hero-magnifying-glass" class="w-8 h-8 mx-auto mb-2 text-gray-600" />
+            <div class="text-center py-8 text-slate-400/80">
+              <.icon name="hero-magnifying-glass" class="w-8 h-8 mx-auto mb-2 text-slate-500" />
               <p class="text-sm">No sessions match your filters</p>
             </div>
           <% else %>
@@ -112,7 +115,7 @@
               <button
                 phx-click="track_session"
                 phx-value-session_key={session.session_key}
-                class="w-full text-left p-3 rounded-lg bg-gray-800 hover:bg-gray-700 transition group"
+                class="w-full text-left p-3 rounded-lg border border-white/8 bg-slate-900/70 hover:bg-slate-800/80 hover:border-rose-300/20 transition group"
               >
                 <div class="flex items-center justify-between">
                   <div class="font-semibold text-sm">{session.circuit}</div>
@@ -123,10 +126,10 @@
                     {session.type}
                   </span>
                 </div>
-                <div class="text-xs text-gray-400 mt-0.5">
+                <div class="text-xs text-slate-300/90 mt-0.5">
                   {session.country} · {session.year}
                 </div>
-                <div class="text-xs text-gray-500 mt-1">
+                <div class="text-xs text-slate-400/80 mt-1">
                   {format_session_date(session.date)}
                 </div>
               </button>
@@ -139,32 +142,53 @@
 <!-- Main Content -->
     <main class="flex-1 flex flex-col lg:flex-row min-h-0">
       <!-- Track Map -->
-      <div class="flex-1 relative min-h-[40vh] lg:min-h-0">
+      <div class="flex-1 relative min-h-[40vh] lg:min-h-0 f1-map-frame">
         <div
           id="track-map"
           phx-hook="TrackMap"
           phx-update="ignore"
-          class="w-full h-full"
+          class="w-full h-full rounded-none lg:rounded-r-2xl overflow-hidden"
         >
           <div id="map-container" class="w-full h-full"></div>
         </div>
 
+        <div class="absolute left-3 top-3 z-20 flex flex-col gap-2">
+          <button
+            type="button"
+            data-map-zoom-in
+            class="f1-map-control"
+            title="Zoom in"
+            aria-label="Zoom in"
+          >
+            <.icon name="hero-plus" class="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            data-map-zoom-out
+            class="f1-map-control"
+            title="Zoom out"
+            aria-label="Zoom out"
+          >
+            <.icon name="hero-minus" class="w-4 h-4" />
+          </button>
+        </div>
+
         <%= if @loading do %>
-          <div class="absolute inset-0 flex items-center justify-center z-10 bg-gray-950/80">
+          <div class="absolute inset-0 flex items-center justify-center z-10 bg-slate-950/75 backdrop-blur-sm">
             <div class="text-center px-4">
               <div class="w-10 h-10 border-4 border-red-500 border-t-transparent rounded-full animate-spin mx-auto mb-4">
               </div>
-              <p class="text-gray-400 text-sm">Loading session data...</p>
+              <p class="text-slate-300 text-sm">Loading session data...</p>
             </div>
           </div>
         <% end %>
 
         <%= if @replay_loading do %>
-          <div class="absolute inset-0 flex items-center justify-center z-10 bg-gray-950/80">
+          <div class="absolute inset-0 flex items-center justify-center z-10 bg-slate-950/75 backdrop-blur-sm">
             <div class="text-center px-4">
-              <div class="w-10 h-10 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4">
+              <div class="w-10 h-10 border-4 border-amber-400 border-t-transparent rounded-full animate-spin mx-auto mb-4">
               </div>
-              <p class="text-gray-400 text-sm">Loading race data for replay...</p>
+              <p class="text-slate-300 text-sm">Loading race data for replay...</p>
             </div>
           </div>
         <% end %>
@@ -174,12 +198,12 @@
             <div class="text-center px-4">
               <div class="text-5xl sm:text-6xl mb-4">🏁</div>
               <h2 class="text-xl sm:text-2xl font-bold mb-2">F1 Live Tracker</h2>
-              <p class="text-gray-400 mb-6 text-sm sm:text-base">
+              <p class="text-slate-300/90 mb-6 text-sm sm:text-base">
                 Real-time car positions & timing data
               </p>
               <button
                 phx-click="load_sessions"
-                class="px-6 py-3 bg-red-600 hover:bg-red-500 rounded-lg font-semibold"
+                class="f1-btn f1-btn-primary px-6 py-3 rounded-lg font-semibold"
               >
                 Get Started
               </button>
@@ -192,7 +216,7 @@
           <% selected_drs = Map.get(@drs, @selected_driver, %{}) %>
           <% selected_lap = latest_lap(@laps, @selected_driver) %>
           <% selected_interval = Map.get(@intervals, @selected_driver, %{}) %>
-          <div class="absolute top-3 right-3 z-10 w-[250px] rounded-lg border border-blue-500/40 bg-gray-900/90 backdrop-blur px-3 py-2">
+          <div class="absolute top-3 right-3 z-10 w-[250px] rounded-xl border border-cyan-300/25 bg-slate-900/80 backdrop-blur-md shadow-[0_10px_24px_rgba(8,145,178,0.18)] px-3 py-2">
             <div class="flex items-center justify-between mb-1.5">
               <div class="flex items-center gap-2">
                 <span
@@ -205,19 +229,19 @@
               <button
                 phx-click="select_driver"
                 phx-value-driver_number={@selected_driver}
-                class="text-[10px] text-gray-400 hover:text-gray-200"
+                class="text-[10px] text-slate-300 hover:text-white"
               >
                 Unfollow
               </button>
             </div>
 
-            <div class="text-[11px] text-gray-300 grid grid-cols-2 gap-x-3 gap-y-1 font-mono">
-              <span class="text-gray-500">Speed</span><span>{format_telemetry_value(selected_drs[:speed])} km/h</span>
-              <span class="text-gray-500">Throttle</span><span>{format_telemetry_value(selected_drs[:throttle])}%</span>
-              <span class="text-gray-500">Brake</span><span>{format_telemetry_value(selected_drs[:brake])}%</span>
-              <span class="text-gray-500">Gear</span><span>{format_telemetry_value(selected_drs[:gear])}</span>
-              <span class="text-gray-500">RPM</span><span>{format_telemetry_value(selected_drs[:rpm])}</span>
-              <span class="text-gray-500">DRS</span>
+            <div class="text-[11px] text-slate-200 grid grid-cols-2 gap-x-3 gap-y-1 font-mono">
+              <span class="text-slate-400">Speed</span><span>{format_telemetry_value(selected_drs[:speed])} km/h</span>
+              <span class="text-slate-400">Throttle</span><span>{format_telemetry_value(selected_drs[:throttle])}%</span>
+              <span class="text-slate-400">Brake</span><span>{format_telemetry_value(selected_drs[:brake])}%</span>
+              <span class="text-slate-400">Gear</span><span>{format_telemetry_value(selected_drs[:gear])}</span>
+              <span class="text-slate-400">RPM</span><span>{format_telemetry_value(selected_drs[:rpm])}</span>
+              <span class="text-slate-400">DRS</span>
               <span>
                 <%= cond do %>
                   <% selected_drs[:active] -> %>
@@ -228,20 +252,20 @@
                     OFF
                 <% end %>
               </span>
-              <span class="text-gray-500">Lap</span><span>{if selected_lap, do: format_lap_time(selected_lap.lap_duration), else: "-"}</span>
-              <span class="text-gray-500">Gap</span><span>{format_gap(selected_interval[:gap_to_leader])}</span>
+              <span class="text-slate-400">Lap</span><span>{if selected_lap, do: format_lap_time(selected_lap.lap_duration), else: "-"}</span>
+              <span class="text-slate-400">Gap</span><span>{format_gap(selected_interval[:gap_to_leader])}</span>
             </div>
           </div>
         <% end %>
 
         <%!-- Replay Controls Bar --%>
         <%= if @replay_active do %>
-          <div class="absolute bottom-0 left-0 right-0 z-10 bg-gray-900/95 border-t border-gray-700 px-3 sm:px-4 py-2">
+          <div class="absolute bottom-0 left-0 right-0 z-10 bg-slate-900/90 border-t border-white/10 backdrop-blur-md px-3 sm:px-4 py-2">
             <div class="flex items-center gap-2 sm:gap-3">
               <%!-- Play/Pause --%>
               <button
                 phx-click="replay_toggle_pause"
-                class="w-8 h-8 flex items-center justify-center rounded-full bg-purple-600 hover:bg-purple-500 transition-colors flex-shrink-0"
+                class="w-8 h-8 flex items-center justify-center rounded-full bg-amber-500 hover:bg-amber-400 transition-colors flex-shrink-0"
               >
                 <%= if @replay_paused do %>
                   <.icon name="hero-play-solid" class="w-4 h-4 text-white" />
@@ -260,13 +284,14 @@
                     step="0.001"
                     value={@replay_progress}
                     name="value"
-                    class="w-full h-1.5 bg-gray-700 rounded-full appearance-none cursor-pointer accent-purple-500"
+                    phx-debounce="200"
+                    class="w-full h-1.5 bg-slate-700 rounded-full appearance-none cursor-pointer accent-amber-400"
                   />
                 </form>
               </div>
 
               <%!-- Time display --%>
-              <div class="text-xs text-gray-400 font-mono flex-shrink-0 hidden sm:block">
+              <div class="text-xs text-slate-300 font-mono flex-shrink-0 hidden sm:block">
                 {format_replay_cursor(@replay_cursor)}
               </div>
 
@@ -279,8 +304,8 @@
                     class={[
                       "px-1.5 py-0.5 text-[10px] font-mono rounded transition-colors",
                       if(@replay_speed == speed,
-                        do: "bg-purple-600 text-white",
-                        else: "bg-gray-800 text-gray-400 hover:bg-gray-700"
+                        do: "bg-amber-500 text-slate-950",
+                        else: "bg-slate-800 text-slate-300 hover:bg-slate-700"
                       )
                     ]}
                   >
@@ -300,26 +325,28 @@
           Desktop (lg+): always-visible sidebar
         --%>
         <aside class={[
-          "bg-gray-900 border-t lg:border-t-0 lg:border-l border-gray-800 overflow-y-auto transition-all duration-300",
+          "f1-panel border-t lg:border-t-0 lg:border-l border-white/10 overflow-y-auto transition-all duration-300",
           "w-full lg:w-[440px]",
           if(@show_timing,
-            do: "max-h-[60vh] lg:max-h-full",
+            do: "max-h-[68vh] lg:max-h-full",
             else: "max-h-0 lg:max-h-full overflow-hidden lg:overflow-y-auto"
           )
         ]}>
           <!-- Timing Header -->
-          <div class="sticky top-0 bg-gray-900 border-b border-gray-800 px-3 sm:px-4 py-2 z-10">
+          <div class="sticky top-0 bg-slate-900/90 backdrop-blur-md border-b border-white/10 px-3 sm:px-4 py-2 z-10">
             <div class="flex items-center justify-between">
-              <h2 class="text-sm font-semibold text-gray-400 uppercase">Timing</h2>
-              <div class="hidden sm:flex gap-2 text-[9px] text-gray-500 uppercase">
-                <span class="text-purple-400">Overall best</span>
-                <span class="text-green-400">Personal best</span>
+              <h2 class="text-sm font-semibold tracking-[0.12em] text-slate-300 uppercase">
+                Timing
+              </h2>
+              <div class="hidden sm:flex gap-2 text-[9px] text-slate-400 uppercase">
+                <span class="text-rose-300">Overall best</span>
+                <span class="text-emerald-300">Personal best</span>
               </div>
             </div>
           </div>
           
 <!-- Driver Rows -->
-          <div class="divide-y divide-gray-800">
+          <div class="divide-y divide-white/5">
             <%= for pos <- @positions do %>
               <% driver = Map.get(@drivers, pos.driver_number, %{}) %>
               <% interval = Map.get(@intervals, pos.driver_number, %{}) %>
@@ -333,15 +360,15 @@
                 phx-click="select_driver"
                 phx-value-driver_number={pos.driver_number}
                 class={[
-                  "px-2 sm:px-4 py-1.5 sm:py-2 flex items-center gap-2 sm:gap-3 transition cursor-pointer",
+                  "px-2.5 sm:px-4 py-2 sm:py-2 flex items-center gap-2 sm:gap-3 transition cursor-pointer",
                   if(@selected_driver == pos.driver_number,
                     do: "bg-blue-900/30 ring-1 ring-blue-500/40",
-                    else: "hover:bg-gray-800/50"
+                    else: "hover:bg-slate-800/55"
                   )
                 ]}
               >
                 <!-- Position -->
-                <div class="w-5 sm:w-6 text-center font-bold text-xs sm:text-sm">
+                <div class="w-6 sm:w-6 text-center font-bold text-sm sm:text-sm text-slate-100">
                   {pos.position}
                 </div>
                 
@@ -353,7 +380,7 @@
                 </div>
                 
 <!-- Driver headshot (hidden on very small screens) -->
-                <div class="hidden sm:block w-8 h-8 rounded-full overflow-hidden bg-gray-700 flex-shrink-0">
+                <div class="w-7 h-7 sm:w-8 sm:h-8 rounded-full overflow-hidden bg-slate-700 flex-shrink-0">
                   <%= if driver[:headshot_url] do %>
                     <img
                       src={driver[:headshot_url]}
@@ -362,8 +389,8 @@
                       loading="lazy"
                     />
                   <% else %>
-                    <div class="w-full h-full flex items-center justify-center text-xs font-bold text-gray-400">
-                      {(driver[:code] && String.slice(driver[:code], 0, 2)) || "?"}
+                    <div class="w-full h-full flex items-center justify-center text-[10px] font-bold text-slate-300">
+                      {driver[:code] || driver[:number] || "--"}
                     </div>
                   <% end %>
                 </div>
@@ -371,37 +398,48 @@
 <!-- Driver info -->
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-1 sm:gap-2">
-                    <span class="font-bold text-xs sm:text-sm">{driver[:code] || "???"}</span>
-                    <span class="hidden sm:inline text-xs text-gray-500">{driver[:number]}</span>
+                    <span class="block max-w-[4.75rem] truncate font-bold text-sm sm:text-sm tracking-wide">
+                      {driver[:code] || "???"}
+                    </span>
+                    <span class="hidden sm:inline text-xs text-slate-400">{driver[:number]}</span>
                   </div>
-                  <div class="hidden sm:block text-xs text-gray-400 truncate">
+                  <div class="hidden sm:block text-xs text-slate-300 truncate">
                     {driver[:team]}
                   </div>
                 </div>
                 
 <!-- Tyre compound -->
-                <div class="flex items-center gap-0.5 sm:gap-1" title={stint && stint[:compound]}>
-                  <div class={[
-                    "w-4 h-4 sm:w-5 sm:h-5 rounded-full flex items-center justify-center text-[9px] sm:text-[10px] font-bold ring-1 ring-gray-600",
-                    tyre_colour(stint && stint[:compound]),
-                    if(stint && stint[:compound] in ["HARD", "MEDIUM"],
-                      do: "text-gray-900",
-                      else: "text-white"
-                    )
-                  ]}>
-                    {tyre_label(stint && stint[:compound])}
-                  </div>
-                  <span class="hidden sm:inline text-[10px] text-gray-500 font-mono w-4 text-right">
+                <div
+                  class="w-9 sm:w-10 flex flex-col items-center justify-center gap-0.5 flex-shrink-0"
+                  title={stint && stint[:compound]}
+                >
+                  <%= if stint && stint[:compound] do %>
+                    <div class={[
+                      "w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ring-1 ring-slate-500/70",
+                      tyre_colour(stint[:compound]),
+                      if(stint[:compound] in ["HARD", "MEDIUM"],
+                        do: "text-gray-900",
+                        else: "text-white"
+                      )
+                    ]}>
+                      {tyre_label(stint[:compound])}
+                    </div>
+                  <% else %>
+                    <div class="w-5 h-5 rounded-full bg-slate-800 ring-1 ring-slate-600/60 flex items-center justify-center text-[10px] text-slate-400">
+                      -
+                    </div>
+                  <% end %>
+                  <span class="hidden sm:inline text-[9px] text-slate-400 font-mono leading-none">
                     {if stint, do: tyre_age(stint, @laps, pos.driver_number), else: "-"}
                   </span>
                 </div>
                 
 <!-- Lap time -->
-                <div class="text-right">
-                  <div class="text-xs sm:text-sm font-mono">
+                <div class="hidden sm:block text-right w-20 sm:w-auto">
+                  <div class="text-xs sm:text-sm font-mono text-slate-100">
                     {if lap, do: format_lap_time(lap.lap_duration), else: "-"}
                   </div>
-                  <div class="hidden sm:block text-xs text-gray-500 font-mono">
+                  <div class="hidden sm:block text-xs text-slate-400 font-mono">
                     {if best, do: "B: #{format_lap_time(best.lap_duration)}", else: ""}
                   </div>
                 </div>
@@ -430,10 +468,10 @@
                 
 <!-- Gap -->
                 <div class="w-14 sm:w-20 text-right">
-                  <div class="text-xs sm:text-sm font-mono text-yellow-400">
+                  <div class="text-xs sm:text-sm font-mono text-amber-300">
                     {format_gap(interval[:gap_to_leader])}
                   </div>
-                  <div class="hidden sm:block text-xs font-mono text-gray-500">
+                  <div class="hidden sm:block text-xs font-mono text-slate-400">
                     {format_gap(interval[:interval])}
                   </div>
                 </div>
@@ -443,12 +481,14 @@
           
 <!-- Race Control Messages -->
           <%= if @race_control != [] do %>
-            <div class="border-t border-gray-800 p-3 sm:p-4">
-              <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">Race Control</h3>
+            <div class="border-t border-white/10 p-3 sm:p-4">
+              <h3 class="text-xs font-semibold text-slate-300 tracking-[0.1em] uppercase mb-2">
+                Race Control
+              </h3>
               <div class="space-y-1">
                 <%= for msg <- Enum.take(@race_control, -5) do %>
                   <div class={"text-xs p-2 rounded #{race_control_class(msg)}"}>
-                    <span class="text-gray-500">
+                    <span class="text-slate-400">
                       {msg["date"] && String.slice(msg["date"], 11, 8)}
                     </span>
                     {msg["message"]}
@@ -460,8 +500,8 @@
           
 <!-- Team Radio -->
           <%= if @team_radio != [] do %>
-            <div class="border-t border-gray-800 p-3 sm:p-4">
-              <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2">
+            <div class="border-t border-white/10 p-3 sm:p-4">
+              <h3 class="text-xs font-semibold text-slate-300 tracking-[0.1em] uppercase mb-2">
                 <.icon name="hero-signal" class="w-3 h-3 inline" /> Team Radio
               </h3>
               <div class="space-y-1.5 max-h-40 overflow-y-auto">
@@ -471,7 +511,7 @@
                     id={"radio-#{radio.driver_number}-#{radio.date}"}
                     phx-hook=".RadioPlayer"
                     data-url={radio.recording_url}
-                    class="flex items-center gap-2 p-1.5 rounded bg-gray-800/50 hover:bg-gray-800 transition cursor-pointer group"
+                    class="flex items-center gap-2 p-1.5 rounded bg-slate-800/60 hover:bg-slate-800/90 transition cursor-pointer group"
                   >
                     <button
                       class="w-6 h-6 rounded-full bg-blue-600 hover:bg-blue-500 flex items-center justify-center flex-shrink-0 transition-colors"
@@ -489,13 +529,13 @@
                         <span class="text-xs font-bold">
                           {radio_driver[:code] || "???"}
                         </span>
-                        <span class="text-[10px] text-gray-500">
+                        <span class="text-[10px] text-slate-400">
                           {radio.date && String.slice(radio.date, 11, 8)}
                         </span>
                       </div>
                     </div>
                     <div
-                      class="w-12 h-1 bg-gray-700 rounded-full overflow-hidden"
+                      class="w-12 h-1 bg-slate-700 rounded-full overflow-hidden"
                       data-progress-bar
                     >
                       <div

@@ -8,9 +8,11 @@ defmodule F1Tracker.F1.SessionServer do
 
   alias F1Tracker.DataProvider
   alias F1Tracker.F1.TrackOutlineCache
+  alias F1Tracker.OpenF1.MQTTStream
 
-  @poll_interval_ms 5_000
-  @location_poll_ms 2_000
+  @poll_interval_ms 6_000
+  @location_poll_ms 3_000
+  @car_data_poll_ms 5_000
   @pubsub F1Tracker.PubSub
 
   # -- Public API --
@@ -44,6 +46,25 @@ defmodule F1Tracker.F1.SessionServer do
     GenServer.cast(__MODULE__, {:replay_from, session_key, from_timestamp})
   end
 
+  @doc "Set focused driver for telemetry polling"
+  def set_focus_driver(driver_number) when is_integer(driver_number) do
+    GenServer.cast(__MODULE__, {:set_focus_driver, driver_number})
+  end
+
+  def set_focus_driver(nil) do
+    GenServer.cast(__MODULE__, {:set_focus_driver, nil})
+  end
+
+  @doc "Merge live locations received from MQTT"
+  def mqtt_locations_update(locations) when is_map(locations) do
+    GenServer.cast(__MODULE__, {:mqtt_locations_update, locations})
+  end
+
+  @doc "Merge live telemetry/DRS received from MQTT"
+  def mqtt_drs_update(drs_map) when is_map(drs_map) do
+    GenServer.cast(__MODULE__, {:mqtt_drs_update, drs_map})
+  end
+
   # -- Callbacks --
 
   @impl true
@@ -73,6 +94,9 @@ defmodule F1Tracker.F1.SessionServer do
       last_race_control_ts: nil,
       replay_mode: false,
       replay_from: nil,
+      focus_driver: nil,
+      last_car_poll_at: nil,
+      mqtt_live: false,
       session_meta: nil,
       track_outline: []
     }
@@ -92,12 +116,38 @@ defmodule F1Tracker.F1.SessionServer do
   @impl true
   def handle_cast(:stop_tracking, state) do
     Logger.info("Stopping session tracking")
-    {:noreply, %{state | tracking: false}}
+    MQTTStream.stop_stream()
+    {:noreply, %{state | tracking: false, focus_driver: nil, mqtt_live: false}}
   end
+
+  @impl true
+  def handle_cast({:set_focus_driver, driver_number}, state) do
+    {:noreply, %{state | focus_driver: driver_number}}
+  end
+
+  @impl true
+  def handle_cast(
+        {:mqtt_locations_update, locations},
+        %{tracking: true, replay_mode: false} = state
+      ) do
+    {:noreply, %{state | locations: Map.merge(state.locations || %{}, locations)}}
+  end
+
+  @impl true
+  def handle_cast({:mqtt_locations_update, _locations}, state), do: {:noreply, state}
+
+  @impl true
+  def handle_cast({:mqtt_drs_update, drs_map}, %{tracking: true, replay_mode: false} = state) do
+    {:noreply, %{state | drs: Map.merge(state.drs || %{}, drs_map)}}
+  end
+
+  @impl true
+  def handle_cast({:mqtt_drs_update, _drs_map}, state), do: {:noreply, state}
 
   @impl true
   def handle_cast({:replay_from, session_key, from_timestamp}, state) do
     Logger.info("Starting replay from #{from_timestamp} for session #{session_key}")
+    MQTTStream.stop_stream()
     # Kick off async driver fetch + historical data fetch
     send(self(), {:init_replay, session_key, from_timestamp})
 
@@ -131,6 +181,7 @@ defmodule F1Tracker.F1.SessionServer do
 
     if completed? do
       Logger.info("Completed session detected, starting replay")
+      MQTTStream.stop_stream()
       # Delegate to ReplayServer for completed sessions
       F1Tracker.F1.ReplayServer.start_replay(session_key, session_meta, drivers)
 
@@ -147,6 +198,7 @@ defmodule F1Tracker.F1.SessionServer do
       {:noreply, new_state}
     else
       # Live session — start incremental polling
+      mqtt_live = maybe_start_mqtt_stream(session_key)
       schedule_poll(:locations)
       schedule_poll(:timing)
       schedule_poll(:race_control)
@@ -165,12 +217,13 @@ defmodule F1Tracker.F1.SessionServer do
       end
 
       now_iso = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-      {:noreply, %{new_state | last_race_control_ts: now_iso}}
+      {:noreply, %{new_state | last_race_control_ts: now_iso, mqtt_live: mqtt_live}}
     end
   end
 
   @impl true
   def handle_info({:init_replay, session_key, from_timestamp}, state) do
+    MQTTStream.stop_stream()
     drivers = fetch_drivers(session_key)
     session_meta = fetch_session_meta(session_key)
     cached_outline = get_cached_outline(session_meta)
@@ -194,34 +247,56 @@ defmodule F1Tracker.F1.SessionServer do
 
   @impl true
   def handle_info({:poll, :locations}, %{tracking: true, session_key: sk} = state) do
-    new_state =
-      case DataProvider.get_location(build_params(sk, state.last_location_ts)) do
-        {:ok, data} when is_list(data) and data != [] ->
-          locations = process_locations(data)
-          last_ts = get_latest_timestamp(data)
-          broadcast("locations:update", locations)
-          %{state | locations: locations, last_location_ts: last_ts}
+    if state.mqtt_live and MQTTStream.connected?() do
+      schedule_poll(:locations)
+      {:noreply, state}
+    else
+      location_params = build_incremental_or_recent_params(sk, state.last_location_ts, 120)
 
-        _ ->
-          state
-      end
+      new_state =
+        case DataProvider.get_location(location_params) do
+          {:ok, data} when is_list(data) and data != [] ->
+            locations = process_locations(data)
+            last_ts = get_latest_timestamp(data)
+            broadcast("locations:update", locations)
+            %{state | locations: locations, last_location_ts: last_ts}
 
-    # Fetch DRS data alongside locations
-    new_state =
-      case DataProvider.get_car_data(build_params(sk, new_state.last_drs_ts)) do
-        {:ok, data} when is_list(data) and data != [] ->
-          drs = process_drs(data)
-          merged_drs = Map.merge(new_state.drs || %{}, drs)
-          last_ts = get_latest_timestamp(data)
-          broadcast("drs:update", merged_drs)
-          %{new_state | drs: merged_drs, last_drs_ts: last_ts}
+          _ ->
+            state
+        end
 
-        _ ->
+      # Fetch car telemetry at a lower cadence to reduce rate-limit pressure.
+      now_ms = System.monotonic_time(:millisecond)
+
+      should_poll_car_data =
+        is_nil(new_state.last_car_poll_at) or
+          now_ms - new_state.last_car_poll_at >= @car_data_poll_ms
+
+      new_state =
+        if should_poll_car_data do
+          car_data_params =
+            build_car_data_params(sk, new_state.last_drs_ts, 30, new_state.focus_driver)
+
+          next_state = %{new_state | last_car_poll_at: now_ms}
+
+          case DataProvider.get_car_data(car_data_params) do
+            {:ok, data} when is_list(data) and data != [] ->
+              drs = process_drs(data)
+              merged_drs = Map.merge(next_state.drs || %{}, drs)
+              last_ts = get_latest_timestamp(data)
+              broadcast("drs:update", merged_drs)
+              %{next_state | drs: merged_drs, last_drs_ts: last_ts}
+
+            _ ->
+              next_state
+          end
+        else
           new_state
-      end
+        end
 
-    schedule_poll(:locations)
-    {:noreply, new_state}
+      schedule_poll(:locations)
+      {:noreply, new_state}
+    end
   end
 
   @impl true
@@ -559,8 +634,11 @@ defmodule F1Tracker.F1.SessionServer do
         last_interval_ts: nil,
         last_position_ts: nil,
         last_drs_ts: nil,
+        last_car_poll_at: nil,
         last_radio_ts: nil,
         last_race_control_ts: nil,
+        mqtt_live: false,
+        focus_driver: nil,
         session_meta: nil,
         track_outline: []
     }
@@ -659,6 +737,7 @@ defmodule F1Tracker.F1.SessionServer do
       _ ->
         %{
           rotation: nil,
+          path: [],
           corners: [],
           marshal_lights: [],
           marshal_sectors: []
@@ -891,6 +970,36 @@ defmodule F1Tracker.F1.SessionServer do
 
   defp build_params(session_key, last_ts),
     do: [{"session_key", session_key}, {"date>", last_ts}]
+
+  defp build_incremental_or_recent_params(session_key, nil, lookback_seconds)
+       when is_integer(lookback_seconds) and lookback_seconds > 0 do
+    from_iso =
+      DateTime.utc_now()
+      |> DateTime.add(-lookback_seconds, :second)
+      |> DateTime.to_iso8601()
+
+    [{"session_key", session_key}, {"date>", from_iso}]
+  end
+
+  defp build_incremental_or_recent_params(session_key, last_ts, _lookback_seconds),
+    do: build_params(session_key, last_ts)
+
+  defp build_car_data_params(session_key, last_ts, lookback_seconds, focus_driver) do
+    base = build_incremental_or_recent_params(session_key, last_ts, lookback_seconds)
+
+    if is_integer(focus_driver) do
+      [{"driver_number", focus_driver} | base]
+    else
+      base
+    end
+  end
+
+  defp maybe_start_mqtt_stream(session_key) when is_integer(session_key) do
+    MQTTStream.start_stream(session_key)
+    true
+  end
+
+  defp maybe_start_mqtt_stream(_), do: false
 
   defp get_latest_timestamp(data) do
     data

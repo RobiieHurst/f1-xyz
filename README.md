@@ -1,80 +1,90 @@
-# F1 Tracker 🏎️
+# F1 Tracker
 
-Real-time Formula 1 car tracker and timing display built with Elixir, Phoenix LiveView, and GEOLYTIX/xyz.
+Real-time Formula 1 tracker built with Phoenix LiveView and OpenF1.
 
 ## Features
 
-- **Live track map** — car positions plotted in real-time using OpenF1 x,y,z telemetry
-- **Timing tower** — positions, lap times, gaps, intervals (just like the TV broadcast)
-- **Race control** — flags, penalties, safety car notifications
-- **Weather** — live track conditions
-- **Replay** — pick any point in time and replay the session from there
-- **Canvas fallback** — works without GEOLYTIX/xyz loaded (auto-scales car dots to canvas)
+- Live race tracking with car positions, timing, weather, race control, and team radio
+- Driver follow mode with focused telemetry (speed, throttle, brake, gear, rpm, DRS)
+- Replay mode with timeline scrubber and speed controls
+- Circuit rendering from OpenF1 Meetings `circuit_info_url` (MultiViewer data)
+- On-map event overlays for overtakes and incidents
 
-## Stack
+## Data Flow
 
-- **Elixir / Phoenix LiveView** — real-time server-rendered UI
-- **GEOLYTIX/xyz MAPP** — OpenLayers-based spatial visualization (optional, canvas fallback included)
-- **OpenF1 API** — free F1 telemetry data (https://openf1.org)
-- **Req** — HTTP client for API calls
+- **Session metadata**: OpenF1 `sessions` + `meetings` + `circuit_info_url`
+- **Live positions/telemetry**:
+  - Primary: OpenF1 MQTT (`v1/location`, `v1/car_data`)
+  - Fallback: OpenF1 REST polling
+- **Replay/historical**: OpenF1 REST range queries
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────┐
-│   OpenF1 API    │────▶│  SessionServer   │────▶│   PubSub    │
-│  (polling)      │     │  (GenServer)     │     │             │
-└─────────────────┘     └──────────────────┘     └──────┬──────┘
-                                                        │
-                                                        ▼
-                                                 ┌─────────────┐
-                                                 │ TrackerLive  │
-                                                 │ (LiveView)   │
-                                                 └──────┬──────┘
-                                                        │
-                                                 push_event
-                                                        │
-                                                        ▼
-                                                 ┌─────────────┐
-                                                 │  TrackMap    │
-                                                 │  (JS Hook)  │
-                                                 │  MAPP/Canvas│
-                                                 └─────────────┘
+OpenF1 (REST + MQTT)
+        |
+        v
+SessionServer / ReplayServer (GenServer)
+        |
+        v
+Phoenix PubSub ("f1:live")
+        |
+        v
+TrackerLive (LiveView) -> TrackMap hook (canvas)
 ```
 
-## Getting Started
+## Quick Start
 
 ```bash
-# Install deps
 mix setup
-
-# Start the server
-mix phx.server
-
-# Or in IEx
 iex -S mix phx.server
 ```
 
-Visit `http://localhost:4000` — click "Get Started", pick a session, and watch it go.
+Open `http://localhost:4000`, load sessions, and start tracking.
 
-## GEOLYTIX/xyz Integration
+## MQTT Notes
 
-For the full map experience with proper circuit overlays:
+- MQTT stream process: `F1Tracker.OpenF1.MQTTStream`
+- Topics consumed: `v1/location`, `v1/car_data`
+- MQTT updates are merged into `SessionServer` live state and broadcast via PubSub
+
+## Simulate MQTT (No Live Race Required)
+
+Use this to test the running app without waiting for an active session stream.
+
+### Recommended (same VM as server)
+
+Start server in IEx:
 
 ```bash
-cd assets && npm install @geolytix/xyz
+iex -S mix phx.server
 ```
 
-Then import MAPP in your JS. The app falls back to a canvas renderer if MAPP isn't loaded.
+Then in IEx:
 
-## TODO
+```elixir
+F1Tracker.Dev.MQTTSimulator.run()
+F1Tracker.Dev.MQTTSimulator.run(ticks: 80, interval_ms: 150, drivers: [1, 16, 44, 55])
+```
 
-- [x] Proper MAPP layer with circuit GeoJSON overlay
-- [x] Tyre compound indicators in timing tower
-- [x] Sector time colouring (purple/green/yellow)
-- [x] Driver headshot images
-- [x] Smooth car position interpolation (lerp between updates)
-- [x] Historical session browser with search/filter
-- [x] DRS detection zones on track map
-- [x] Team radio playback integration
-- [x] Mobile-responsive layout
+### Mix task
+
+```bash
+mix f1.simulate_mqtt
+mix f1.simulate_mqtt --ticks 80 --interval-ms 150 --drivers 1,16,44,55 --session-key 9158
+```
+
+## Tests
+
+Run full checks:
+
+```bash
+mix precommit
+```
+
+MQTT-specific tests:
+
+```bash
+mix test test/f1_tracker/f1/session_server_mqtt_test.exs
+mix test test/f1_tracker/open_f1/mqtt_stream_simulation_test.exs
+```
