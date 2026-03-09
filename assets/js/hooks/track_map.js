@@ -4,6 +4,7 @@ const MAX_LERP_MS = 1600;
 const TELEPORT_THRESHOLD = 5000;
 const MAX_LABEL_DISTANCE = 20000;
 const TRACK_EVENT_TTL_MS = 10000;
+const POSITION_NOISE_THRESHOLD = 1.8;
 
 const DEFAULT_ANCHOR = [2.3522, 48.8566];
 const MIN_FRAME_RANGE = 800;
@@ -92,6 +93,20 @@ const TrackMap = {
     this.hasFitView = false;
     this.userMovedMap = false;
     this.followDriver = null;
+    this.trackBounds = null;
+    this.trackBoundsKey = null;
+    this.driverHitAreas = [];
+    this.pendingTap = null;
+    this.debugMapSelection = false;
+    this.lastSelectProbe = null;
+
+    try {
+      const params = new URLSearchParams(globalThis.location?.search || "");
+      this.debugMapSelection =
+        params.get("map_debug") === "1" || globalThis.localStorage?.getItem("f1_map_debug") === "1";
+    } catch (_error) {
+      this.debugMapSelection = false;
+    }
 
     // Canvas interaction state (zoom + pan)
     this.viewZoom = 1;
@@ -158,6 +173,10 @@ const TrackMap = {
     this.hasFitView = false;
     this.userMovedMap = false;
     this.followDriver = null;
+    this.trackBounds = null;
+    this.trackBoundsKey = null;
+    this.driverHitAreas = [];
+    this.pendingTap = null;
     this.viewZoom = 1;
     this.viewPanX = 0;
     this.viewPanY = 0;
@@ -233,30 +252,109 @@ const TrackMap = {
     this.ctx = canvas.getContext("2d");
     this.mapReady = true;
     this.canvas.style.touchAction = "none";
+    this.activePointers = new globalThis.Map();
+    this.pinchLastDistance = null;
+    this.pinchLastCenter = null;
+    this.canvasCssWidth = 0;
+    this.canvasCssHeight = 0;
+    this.mouseTapCandidate = null;
 
     this._wheelHandler = (event) => {
       event.preventDefault();
 
-      const rect = canvas.getBoundingClientRect();
-      const mouseX = event.clientX - rect.left;
-      const mouseY = event.clientY - rect.top;
+      const { x: mouseX, y: mouseY } = this.getEventCanvasPoint(event, canvas);
 
       const zoomFactor = event.deltaY < 0 ? 1.1 : 0.9;
       this.zoomAroundPoint(mouseX, mouseY, zoomFactor);
     };
 
     this._pointerDownHandler = (event) => {
-      this.isDragging = true;
-      this.dragLastX = event.clientX;
-      this.dragLastY = event.clientY;
-      canvas.setPointerCapture?.(event.pointerId);
+      const { x: localX, y: localY } = this.getEventCanvasPoint(event, canvas);
+
+      this.activePointers.set(event.pointerId, {
+        x: localX,
+        y: localY,
+      });
+
+      if (this.activePointers.size === 1) {
+        this.isDragging = true;
+        this.dragLastX = event.clientX;
+        this.dragLastY = event.clientY;
+
+        if (event.pointerType === "mouse" && event.button === 0) {
+          this.mouseTapCandidate = {
+            pointerId: event.pointerId,
+            x: localX,
+            y: localY,
+            moved: false,
+          };
+          this.pendingTap = null;
+        } else {
+          this.pendingTap = {
+            pointerId: event.pointerId,
+            x: localX,
+            y: localY,
+            startedAt: performance.now(),
+            moved: false,
+          };
+        }
+      } else {
+        this.isDragging = false;
+        this.pendingTap = null;
+
+        const pinch = this.getPinchData();
+        if (pinch) {
+          this.pinchLastDistance = pinch.distance;
+          this.pinchLastCenter = pinch.center;
+        }
+      }
+
+      if (event.pointerType !== "mouse") {
+        canvas.setPointerCapture?.(event.pointerId);
+      }
     };
 
     this._pointerMoveHandler = (event) => {
+      const { x: localX, y: localY } = this.getEventCanvasPoint(event, canvas);
+
+      if (this.activePointers.has(event.pointerId)) {
+        this.activePointers.set(event.pointerId, { x: localX, y: localY });
+      }
+
+      if (this.pendingTap && this.pendingTap.pointerId === event.pointerId) {
+        const movedDist = Math.hypot(localX - this.pendingTap.x, localY - this.pendingTap.y);
+        if (movedDist > 9) this.pendingTap.moved = true;
+      }
+
+      if (this.mouseTapCandidate && this.mouseTapCandidate.pointerId === event.pointerId) {
+        const movedDist = Math.hypot(localX - this.mouseTapCandidate.x, localY - this.mouseTapCandidate.y);
+        if (movedDist > 6) this.mouseTapCandidate.moved = true;
+      }
+
+      if (this.activePointers.size >= 2) {
+        const pinch = this.getPinchData();
+        if (!pinch) return;
+
+        if (this.pinchLastDistance && pinch.distance > 0) {
+          const factor = pinch.distance / this.pinchLastDistance;
+          this.zoomAroundPoint(pinch.center.x, pinch.center.y, factor);
+
+          if (this.pinchLastCenter) {
+            this.viewPanX += pinch.center.x - this.pinchLastCenter.x;
+            this.viewPanY += pinch.center.y - this.pinchLastCenter.y;
+          }
+        }
+
+        this.pinchLastDistance = pinch.distance;
+        this.pinchLastCenter = pinch.center;
+        return;
+      }
+
       if (!this.isDragging) return;
 
       const dx = event.clientX - this.dragLastX;
       const dy = event.clientY - this.dragLastY;
+
       this.dragLastX = event.clientX;
       this.dragLastY = event.clientY;
 
@@ -265,13 +363,49 @@ const TrackMap = {
     };
 
     this._pointerUpHandler = (event) => {
-      this.isDragging = false;
-      canvas.releasePointerCapture?.(event.pointerId);
-    };
+      const { x: localX, y: localY } = this.getEventCanvasPoint(event, canvas);
 
-    this._dblClickHandler = (event) => {
-      event.preventDefault();
-      this.resetView();
+      const tap = this.pendingTap;
+      const now = performance.now();
+
+      if (
+        tap &&
+        tap.pointerId === event.pointerId &&
+        !tap.moved &&
+        now - tap.startedAt <= 350 &&
+        this.activePointers.size === 1
+      ) {
+        this.selectDriverAt(localX, localY);
+      }
+
+      this.pendingTap = null;
+
+      if (this.mouseTapCandidate && this.mouseTapCandidate.pointerId === event.pointerId) {
+        if (event.pointerType === "mouse" && !this.mouseTapCandidate.moved) {
+          this.selectDriverAt(this.mouseTapCandidate.x, this.mouseTapCandidate.y);
+        }
+
+        this.mouseTapCandidate = null;
+      }
+
+      this.activePointers.delete(event.pointerId);
+      this.isDragging = false;
+      this.pinchLastDistance = null;
+      this.pinchLastCenter = null;
+
+      if (this.activePointers.size === 1) {
+        const remaining = this.activePointers.values().next().value;
+        if (remaining) {
+          const rect = canvas.getBoundingClientRect();
+          this.isDragging = true;
+          this.dragLastX = rect.left + remaining.x;
+          this.dragLastY = rect.top + remaining.y;
+        }
+      }
+
+      if (event.pointerType !== "mouse") {
+        canvas.releasePointerCapture?.(event.pointerId);
+      }
     };
 
     this._zoomInBtn = this.el.querySelector("[data-map-zoom-in]");
@@ -313,12 +447,8 @@ const TrackMap = {
     canvas.addEventListener("pointermove", this._pointerMoveHandler);
     canvas.addEventListener("pointerup", this._pointerUpHandler);
     canvas.addEventListener("pointercancel", this._pointerUpHandler);
-    canvas.addEventListener("dblclick", this._dblClickHandler);
 
-    const resize = () => {
-      canvas.width = container.clientWidth;
-      canvas.height = container.clientHeight;
-    };
+    const resize = () => this.resizeCanvas();
 
     window.addEventListener("resize", resize);
     this._resizeHandler = resize;
@@ -333,12 +463,93 @@ const TrackMap = {
     this.viewPanY = 0;
   },
 
+  resizeCanvas() {
+    if (!this.canvas || !this.ctx) return;
+
+    const cssWidth = Math.max(1, this.canvas.parentElement?.clientWidth || this.canvas.clientWidth || 1);
+    const cssHeight = Math.max(1, this.canvas.parentElement?.clientHeight || this.canvas.clientHeight || 1);
+    const dpr = Math.min(globalThis.devicePixelRatio || 1, 3);
+
+    this.canvasCssWidth = cssWidth;
+    this.canvasCssHeight = cssHeight;
+
+    this.canvas.width = Math.round(cssWidth * dpr);
+    this.canvas.height = Math.round(cssHeight * dpr);
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.ctx.imageSmoothingEnabled = true;
+  },
+
+  getPinchData() {
+    if (this.activePointers.size < 2) return null;
+
+    const [a, b] = Array.from(this.activePointers.values());
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+
+    return {
+      distance: Math.hypot(dx, dy),
+      center: {
+        x: (a.x + b.x) / 2,
+        y: (a.y + b.y) / 2,
+      },
+    };
+  },
+
+  getEventCanvasPoint(event, canvas) {
+    if (event.target === canvas && Number.isFinite(event.offsetX) && Number.isFinite(event.offsetY)) {
+      return { x: event.offsetX, y: event.offsetY };
+    }
+
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top,
+    };
+  },
+
+  selectDriverAt(x, y) {
+    if (!Array.isArray(this.driverHitAreas) || this.driverHitAreas.length === 0) return;
+
+    let closest = null;
+    let bestDistSq = Infinity;
+
+    for (const area of this.driverHitAreas) {
+      const dx = x - area.x;
+      const dy = y - area.y;
+      const distSq = dx * dx + dy * dy;
+
+      if (distSq <= area.radius * area.radius && distSq < bestDistSq) {
+        bestDistSq = distSq;
+        closest = area;
+      }
+    }
+
+    if (closest) {
+      this.pushEvent("select_driver", { driver_number: String(closest.driverNumber) });
+    }
+
+    if (this.debugMapSelection) {
+      this.lastSelectProbe = {
+        x,
+        y,
+        driverNumber: closest ? String(closest.driverNumber) : null,
+        hitRadius: closest?.radius || null,
+        hitCount: this.driverHitAreas.length,
+        at: performance.now(),
+      };
+
+      globalThis.console.debug("[TrackMap debug] select probe", this.lastSelectProbe);
+    }
+  },
+
   zoomByFactor(factor) {
     if (!this.canvas || !Number.isFinite(factor) || factor <= 0) return;
 
-    const cx = this.canvas.width / 2;
-    const cy = this.canvas.height / 2;
-    this.zoomAroundPoint(cx, cy, factor);
+    const cx = this.canvasCssWidth || this.canvas.clientWidth || this.canvas.width;
+    const cy = this.canvasCssHeight || this.canvas.clientHeight || this.canvas.height;
+    const centerX = cx / 2;
+    const centerY = cy / 2;
+    this.zoomAroundPoint(centerX, centerY, factor);
   },
 
   zoomAroundPoint(pointX, pointY, factor) {
@@ -349,8 +560,10 @@ const TrackMap = {
 
     if (newZoom === oldZoom) return;
 
-    const cx = this.canvas.width / 2;
-    const cy = this.canvas.height / 2;
+    const canvasWidth = this.canvasCssWidth || this.canvas.clientWidth || this.canvas.width;
+    const canvasHeight = this.canvasCssHeight || this.canvas.clientHeight || this.canvas.height;
+    const cx = canvasWidth / 2;
+    const cy = canvasHeight / 2;
 
     this.viewPanX = pointX - ((pointX - cx - this.viewPanX) / oldZoom) * newZoom - cx;
     this.viewPanY = pointY - ((pointY - cy - this.viewPanY) / oldZoom) * newZoom - cy;
@@ -403,6 +616,55 @@ const TrackMap = {
     }
 
     return this.getCircuitPath();
+  },
+
+  getTrackBounds(path) {
+    if (!Array.isArray(path) || path.length < 2) return null;
+
+    const first = path[0];
+    const mid = path[Math.floor(path.length / 2)];
+    const last = path[path.length - 1];
+    const key = [
+      path.length,
+      first.x.toFixed(1),
+      first.y.toFixed(1),
+      mid.x.toFixed(1),
+      mid.y.toFixed(1),
+      last.x.toFixed(1),
+      last.y.toFixed(1),
+    ].join(":");
+
+    if (this.trackBoundsKey === key && this.trackBounds) {
+      return this.trackBounds;
+    }
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    for (const point of path) {
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+      if (point.x < minX) minX = point.x;
+      if (point.x > maxX) maxX = point.x;
+      if (point.y < minY) minY = point.y;
+      if (point.y > maxY) maxY = point.y;
+    }
+
+    if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY)) {
+      return null;
+    }
+
+    const pad = 140;
+    this.trackBounds = {
+      minX: minX - pad,
+      maxX: maxX + pad,
+      minY: minY - pad,
+      maxY: maxY + pad,
+    };
+    this.trackBoundsKey = key;
+
+    return this.trackBounds;
   },
 
   getCircuitPath() {
@@ -609,11 +871,21 @@ const TrackMap = {
           existing.lerpMs = MIN_LERP_MS;
         } else {
           const updateGap = Math.max(1, now - (existing.lastUpdateAt || now));
+
+          // Ignore tiny telemetry jitter and smooth toward the incoming target.
+          const nextTarget =
+            dist < POSITION_NOISE_THRESHOLD
+              ? {
+                x: existing.target.x + (loc.x - existing.target.x) * 0.35,
+                y: existing.target.y + (loc.y - existing.target.y) * 0.35,
+              }
+              : { x: loc.x, y: loc.y };
+
           // Follow real update cadence: long polling intervals get longer blend,
           // high-frequency MQTT updates stay snappy.
-          existing.lerpMs = Math.max(MIN_LERP_MS, Math.min(MAX_LERP_MS, updateGap * 0.9));
+          existing.lerpMs = Math.max(MIN_LERP_MS, Math.min(MAX_LERP_MS, updateGap * 1.05));
           existing.prev = { x: existing.current.x, y: existing.current.y };
-          existing.target = { x: loc.x, y: loc.y };
+          existing.target = nextTarget;
         }
 
         existing.startTime = now;
@@ -806,9 +1078,10 @@ const TrackMap = {
     if (!this.canvas || !this.ctx) return;
 
     const ctx = this.ctx;
-    const w = this.canvas.width;
-    const h = this.canvas.height;
+    const w = this.canvasCssWidth || this.canvas.clientWidth || this.canvas.width;
+    const h = this.canvasCssHeight || this.canvas.clientHeight || this.canvas.height;
     const now = performance.now();
+    this.pruneTrackEvents(now);
 
     for (const [, car] of Object.entries(this.carStates)) {
       const elapsed = now - car.startTime;
@@ -834,12 +1107,27 @@ const TrackMap = {
     }
 
     const trackPath = this.getTrackPath();
-    const xs = [...entries.map(([, c]) => c.current.x), ...trackPath.map((p) => p.x)];
-    const ys = [...entries.map(([, c]) => c.current.y), ...trackPath.map((p) => p.y)];
-    const minX = Math.min(...xs);
-    const maxX = Math.max(...xs);
-    const minY = Math.min(...ys);
-    const maxY = Math.max(...ys);
+    const trackBounds = this.getTrackBounds(trackPath);
+
+    let minX;
+    let maxX;
+    let minY;
+    let maxY;
+
+    if (trackBounds) {
+      minX = trackBounds.minX;
+      maxX = trackBounds.maxX;
+      minY = trackBounds.minY;
+      maxY = trackBounds.maxY;
+    } else {
+      const xs = entries.map(([, c]) => c.current.x);
+      const ys = entries.map(([, c]) => c.current.y);
+      minX = Math.min(...xs);
+      maxX = Math.max(...xs);
+      minY = Math.min(...ys);
+      maxY = Math.max(...ys);
+    }
+
     const rangeX = maxX - minX || 1;
     const rangeY = maxY - minY || 1;
     const scale = Math.min((w - 80) / rangeX, (h - 80) / rangeY);
@@ -968,7 +1256,9 @@ const TrackMap = {
       }
     }
 
-    for (const [, car] of entries) {
+    this.driverHitAreas = [];
+
+    for (const [driverNum, car] of entries) {
       const px0 = (car.current.x - minX) * scale + offsetX;
       const py0 = (car.current.y - minY) * scale + offsetY;
       const transformed = transformScreen(px0, py0);
@@ -1003,6 +1293,13 @@ const TrackMap = {
       ctx.font = `bold ${Math.max(8, 10 * this.viewZoom)}px monospace`;
       ctx.textAlign = "center";
       ctx.fillText(label, px, py - Math.max(8, 10 * this.viewZoom));
+
+      this.driverHitAreas.push({
+        driverNumber: driverNum,
+        x: px,
+        y: py,
+        radius: Math.max(20, avatarRadius + 12),
+      });
 
     }
 
@@ -1061,13 +1358,40 @@ const TrackMap = {
     ctx.fillStyle = "rgba(255,255,255,0.8)";
     ctx.font = "12px sans-serif";
     ctx.fillText(subtitle ? `${title} - ${subtitle}` : title, 12, 20);
-    ctx.font = "11px sans-serif";
-    ctx.fillStyle = "rgba(180,180,180,0.8)";
-    ctx.fillText("Scroll: zoom | Drag: pan | Double-click: reset", 12, 38);
 
     if (trackPath.length <= 1) {
       ctx.fillStyle = "rgba(180,180,180,0.7)";
-      ctx.fillText("Waiting for circuit info...", 12, 56);
+      ctx.font = "11px sans-serif";
+      ctx.fillText("Waiting for circuit info...", 12, 38);
+    }
+
+    if (this.debugMapSelection) {
+      for (const area of this.driverHitAreas) {
+        ctx.beginPath();
+        ctx.arc(area.x, area.y, area.radius, 0, Math.PI * 2);
+        ctx.strokeStyle = "rgba(251, 191, 36, 0.45)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = "rgba(251, 191, 36, 0.9)";
+        ctx.font = "10px monospace";
+        ctx.textAlign = "center";
+        ctx.fillText(String(area.driverNumber), area.x, area.y + 3);
+      }
+
+      const probe = this.lastSelectProbe;
+      if (probe && performance.now() - probe.at <= 3_000) {
+        ctx.beginPath();
+        ctx.arc(probe.x, probe.y, 5, 0, Math.PI * 2);
+        ctx.fillStyle = probe.driverNumber ? "rgba(34,197,94,0.9)" : "rgba(239,68,68,0.9)";
+        ctx.fill();
+
+        ctx.textAlign = "left";
+        ctx.font = "11px monospace";
+        ctx.fillStyle = "rgba(248,250,252,0.95)";
+        const msg = probe.driverNumber ? `hit ${probe.driverNumber}` : `miss (${probe.hitCount} areas)`;
+        ctx.fillText(msg, 12, h - 14);
+      }
     }
   },
 
@@ -1089,7 +1413,6 @@ const TrackMap = {
         this.canvas.removeEventListener("pointerup", this._pointerUpHandler);
         this.canvas.removeEventListener("pointercancel", this._pointerUpHandler);
       }
-      if (this._dblClickHandler) this.canvas.removeEventListener("dblclick", this._dblClickHandler);
     }
 
     if (this._zoomInBtn && this._zoomInHandler) {

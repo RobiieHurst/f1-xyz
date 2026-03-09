@@ -131,7 +131,32 @@ defmodule F1Tracker.F1.ReplayServer do
 
   @impl true
   def handle_cast({:set_speed, speed}, %{active: true} = state) do
-    new_state = %{state | speed: speed}
+    now_wall = System.monotonic_time(:millisecond)
+
+    cursor_at_change =
+      if state.paused or is_nil(state.replay_cursor) or is_nil(state.wall_start) do
+        state.replay_cursor
+      else
+        elapsed_wall_ms = max(now_wall - state.wall_start, 0)
+        elapsed_session_ms = trunc(elapsed_wall_ms * state.speed)
+
+        state.replay_cursor
+        |> DateTime.add(elapsed_session_ms, :millisecond)
+        |> clamp_datetime(state.session_start, state.session_end)
+      end
+
+    if state.tick_ref, do: Process.cancel_timer(state.tick_ref)
+
+    new_state =
+      %{
+        state
+        | speed: speed,
+          replay_cursor: cursor_at_change,
+          wall_start: now_wall,
+          tick_ref: nil
+      }
+      |> maybe_schedule_speed_tick()
+
     broadcast_replay_state(new_state)
     {:noreply, new_state}
   end
@@ -416,7 +441,10 @@ defmodule F1Tracker.F1.ReplayServer do
   # -- Replay Tick --
 
   @impl true
-  def handle_info(:replay_tick, %{active: true, paused: false} = state) do
+  def handle_info(
+        {:replay_tick, tick_id},
+        %{active: true, paused: false, tick_id: tick_id} = state
+      ) do
     now_wall = System.monotonic_time(:millisecond)
     elapsed_wall_ms = now_wall - state.wall_start
     elapsed_session_ms = trunc(elapsed_wall_ms * state.speed)
@@ -446,10 +474,13 @@ defmodule F1Tracker.F1.ReplayServer do
   end
 
   @impl true
-  def handle_info(:replay_tick, state) do
+  def handle_info({:replay_tick, _tick_id}, state) do
     # Not active or paused, ignore
     {:noreply, state}
   end
+
+  @impl true
+  def handle_info(:replay_tick, state), do: {:noreply, state}
 
   @impl true
   def handle_info(:warm_cache_chunk, %{active: true} = state) do
@@ -1043,6 +1074,7 @@ defmodule F1Tracker.F1.ReplayServer do
       chunk_start: nil,
       chunk_end: nil,
       tick_ref: nil,
+      tick_id: 0,
       warm_ref: nil,
       warm_cursor: nil,
       has_track_outline: false,
@@ -1061,9 +1093,13 @@ defmodule F1Tracker.F1.ReplayServer do
   end
 
   defp schedule_tick(state) do
-    ref = Process.send_after(self(), :replay_tick, @tick_interval_ms)
-    %{state | tick_ref: ref}
+    next_tick_id = state.tick_id + 1
+    ref = Process.send_after(self(), {:replay_tick, next_tick_id}, @tick_interval_ms)
+    %{state | tick_ref: ref, tick_id: next_tick_id}
   end
+
+  defp maybe_schedule_speed_tick(%{active: true, paused: false} = state), do: schedule_tick(state)
+  defp maybe_schedule_speed_tick(state), do: state
 
   defp maybe_schedule_autowarm(state) do
     cond do

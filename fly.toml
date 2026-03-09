@@ -14,7 +14,7 @@ kill_signal = 'SIGTERM'
   PORT = '8080'
 
 [http_service]
-  internal_port = 8080
+  internal_port = '8080'
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
@@ -33,5 +33,4 @@ kill_signal = 'SIGTERM'
 
 [[vm]]
   memory = '1gb'
-  cpu_kind = 'shared'
-  cpus = 1
+  size = 'shared-cpu-4x'
