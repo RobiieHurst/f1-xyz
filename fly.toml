@@ -33,4 +33,5 @@ kill_signal = 'SIGTERM'
 
 [[vm]]
   memory = '1gb'
-  size = 'shared-cpu-4x'
+  cpu_kind = 'shared'
+  cpus = 2
