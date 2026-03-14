@@ -1,5 +1,4 @@
 <div class="f1-shell min-h-screen text-slate-100" phx-window-keydown="replay_shortcut">
-  <!-- Header -->
   <header class="f1-topbar px-3 sm:px-6 py-3 flex items-center justify-between">
     <div class="flex items-center gap-2 sm:gap-3">
       <h1 class="text-lg sm:text-xl font-semibold tracking-wide text-rose-300">F1 Tracker</h1>
@@ -11,7 +10,6 @@
     </div>
 
     <div class="flex items-center gap-2 sm:gap-3">
-      <!-- Weather: icons only on mobile, full text on desktop -->
       <%= if @weather do %>
         <div class="hidden sm:flex text-sm text-slate-300/90 gap-2">
           <span>{@weather["air_temperature"]}°C</span>
@@ -25,7 +23,6 @@
       <% end %>
 
       <%= if @tracking do %>
-        <!-- Mobile timing toggle -->
         <button
           phx-click="toggle_timing"
           class="f1-btn f1-btn-ghost lg:hidden px-2.5 py-1.5 text-sm"
@@ -60,8 +57,6 @@
           <h2 class="text-sm font-semibold tracking-[0.12em] text-slate-300 uppercase">
             Sessions
           </h2>
-          
-<!-- Search -->
           <div class="relative">
             <.icon
               name="hero-magnifying-glass"
@@ -77,8 +72,6 @@
               class="w-full bg-slate-900/70 border border-white/10 rounded-lg pl-8 pr-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-rose-400/70 focus:border-rose-400/70"
             />
           </div>
-          
-<!-- Type filter pills -->
           <div class="flex flex-wrap gap-1.5">
             <%= for type <- session_types() do %>
               <button
@@ -102,8 +95,6 @@
             {length(@sessions)} session(s) found
           </div>
         </div>
-        
-<!-- Session list (scrollable) -->
         <div class="flex-1 overflow-y-auto p-3 sm:p-4 space-y-2">
           <%= if @sessions == [] do %>
             <div class="text-center py-8 text-slate-400/80">
@@ -119,11 +110,12 @@
               >
                 <div class="flex items-center justify-between">
                   <div class="font-semibold text-sm">{session.circuit}</div>
+
                   <span class={[
                     "text-[10px] font-medium px-1.5 py-0.5 rounded",
-                    session_type_badge(session.type)
+                    session_type_badge(session.name)
                   ]}>
-                    {session.type}
+                    {session.name}
                   </span>
                 </div>
                 <div class="text-xs text-slate-300/90 mt-0.5">
@@ -138,8 +130,6 @@
         </div>
       </aside>
     <% end %>
-    
-<!-- Main Content -->
     <main class="flex-1 flex flex-col lg:flex-row min-h-0">
       <!-- Track Map -->
       <div class="flex-1 relative min-h-[40vh] lg:min-h-0 f1-map-frame">
@@ -258,7 +248,6 @@
           </div>
         <% end %>
 
-        <%!-- Replay Controls Bar --%>
         <%= if @replay_active do %>
           <div class="absolute bottom-0 left-0 right-0 z-10 bg-slate-900/90 border-t border-white/10 backdrop-blur-md px-3 sm:px-4 py-2">
             <div class="flex items-center gap-2 sm:gap-3">
@@ -299,7 +288,6 @@
                 </form>
               </div>
 
-              <%!-- Time display --%>
               <div class="text-xs text-slate-300 font-mono flex-shrink-0 hidden sm:block">
                 {format_replay_cursor(@replay_cursor)}
               </div>
@@ -313,7 +301,6 @@
                 +5s
               </button>
 
-              <%!-- Speed selector --%>
               <div class="flex items-center gap-1 flex-shrink-0">
                 <%= for speed <- [1, 5, 10, 20, 50] do %>
                   <button
@@ -335,8 +322,6 @@
           </div>
         <% end %>
       </div>
-      
-<!-- Timing Tower -->
       <%= if @tracking do %>
         <%!--
           Mobile: slide-up panel controlled by @show_timing
@@ -362,8 +347,6 @@
               </div>
             </div>
           </div>
-          
-<!-- Driver Rows -->
           <div class="divide-y divide-white/5">
             <%= for pos <- @positions do %>
               <% driver = Map.get(@drivers, pos.driver_number, %{}) %>
@@ -389,15 +372,11 @@
                 <div class="w-6 sm:w-6 text-center font-bold text-sm sm:text-sm text-slate-100">
                   {pos.position}
                 </div>
-                
-<!-- Team colour bar -->
                 <div
                   class="w-1 h-6 sm:h-8 rounded-full flex-shrink-0"
                   style={"background-color: ##{driver[:team_colour] || "666"}"}
                 >
                 </div>
-                
-<!-- Driver headshot (hidden on very small screens) -->
                 <div class="w-7 h-7 sm:w-8 sm:h-8 rounded-full overflow-hidden bg-slate-700 flex-shrink-0">
                   <%= if driver[:headshot_url] do %>
                     <img
@@ -412,8 +391,6 @@
                     </div>
                   <% end %>
                 </div>
-                
-<!-- Driver info -->
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-1 sm:gap-2">
                     <span class="block max-w-[4.75rem] truncate font-bold text-sm sm:text-sm tracking-wide">
@@ -425,8 +402,6 @@
                     {driver[:team]}
                   </div>
                 </div>
-                
-<!-- Tyre compound -->
                 <div
                   class="w-9 sm:w-10 flex flex-col items-center justify-center gap-0.5 flex-shrink-0"
                   title={stint && stint[:compound]}
@@ -451,8 +426,6 @@
                     {if stint, do: tyre_age(stint, @laps, pos.driver_number), else: "-"}
                   </span>
                 </div>
-                
-<!-- Lap time -->
                 <div class="hidden sm:block text-right w-20 sm:w-auto">
                   <div class="text-xs sm:text-sm font-mono text-slate-100">
                     {if lap, do: format_lap_time(lap.lap_duration), else: "-"}
@@ -461,8 +434,7 @@
                     {if best, do: "B: #{format_lap_time(best.lap_duration)}", else: ""}
                   </div>
                 </div>
-                
-<!-- Sector times (desktop only) -->
+
                 <div class="hidden xl:flex gap-px">
                   <div class={[
                     "text-[10px] font-mono w-[42px] text-center px-0.5 py-0.5 rounded-sm",
@@ -483,8 +455,6 @@
                     {format_sector(lap && lap.sector_3)}
                   </div>
                 </div>
-                
-<!-- Gap -->
                 <div class="w-14 sm:w-20 text-right">
                   <div class="text-xs sm:text-sm font-mono text-amber-300">
                     {format_gap(interval[:gap_to_leader])}
@@ -496,8 +466,7 @@
               </div>
             <% end %>
           </div>
-          
-<!-- Race Control Messages -->
+
           <%= if @race_control != [] do %>
             <div class="border-t border-white/10 p-3 sm:p-4">
               <h3 class="text-xs font-semibold text-slate-300 tracking-[0.1em] uppercase mb-2">
@@ -515,8 +484,7 @@
               </div>
             </div>
           <% end %>
-          
-<!-- Team Radio -->
+          <!-- Team Radio -->
           <%= if @team_radio != [] do %>
             <div class="border-t border-white/10 p-3 sm:p-4">
               <h3 class="text-xs font-semibold text-slate-300 tracking-[0.1em] uppercase mb-2">

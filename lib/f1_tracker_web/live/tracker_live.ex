@@ -753,10 +753,7 @@ defmodule F1TrackerWeb.TrackerLive do
     "all",
     "Race",
     "Qualifying",
-    "Practice",
-    "Sprint",
-    "Sprint Qualifying",
-    "Sprint Shootout"
+    "Practice"
   ]
 
   def session_types, do: @session_types
@@ -767,7 +764,6 @@ defmodule F1TrackerWeb.TrackerLive do
   def session_type_badge("Race"), do: "bg-red-900/60 text-red-300"
   def session_type_badge("Qualifying"), do: "bg-blue-900/60 text-blue-300"
   def session_type_badge("Sprint"), do: "bg-orange-900/60 text-orange-300"
-  def session_type_badge("Sprint Qualifying"), do: "bg-orange-900/60 text-orange-300"
   def session_type_badge("Sprint Shootout"), do: "bg-orange-900/60 text-orange-300"
   def session_type_badge("Practice"), do: "bg-gray-700/60 text-gray-300"
   def session_type_badge(_), do: "bg-gray-700/60 text-gray-300"
